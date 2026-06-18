@@ -6,12 +6,38 @@ DevelopmentTeam provides a complete, production-ready team of AI agents for open
 
 ## Installation
 
-```bash
-# Global install via npm
-npm install -g development-team
+### Option 1: Local install (recommended)
 
-# Or use directly via npx
-npx development-team <command>
+```bash
+# Clone the repository
+git clone https://github.com/iRumba/DevelopmentTeam.git
+cd DevelopmentTeam
+
+# Install dependencies and build
+npm install
+npm run build
+
+# Install globally from local directory
+npm install -g .
+
+# Now you can use `dev-team` anywhere
+dev-team help
+```
+
+### Option 2: Direct from GitHub
+
+```bash
+# Install directly from GitHub
+npm install -g https://github.com/iRumba/DevelopmentTeam.git
+
+# Now you can use `dev-team` anywhere
+dev-team help
+```
+
+### Option 3: Via npx (no install)
+
+```bash
+npx https://github.com/iRumba/DevelopmentTeam.git help
 ```
 
 ## Usage
@@ -82,14 +108,10 @@ The `build` agent acts as the team orchestrator. It:
 ## Development
 
 ```bash
-# Clone the repository
+# Clone and prepare
 git clone https://github.com/iRumba/DevelopmentTeam.git
 cd DevelopmentTeam
-
-# Install dependencies
 npm install
-
-# Build
 npm run build
 
 # Test locally
