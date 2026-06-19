@@ -1,5 +1,5 @@
 {
-  "name": "development-team-project",
+  "name": "development-team-jsonc-mcp",
   "private": true,
   "dependencies": {
     "jsonc-parser": "^3.3.1"
