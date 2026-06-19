@@ -11,6 +11,7 @@ import {
 import { resolve, dirname, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
+import { parse as parseJsoncSafe } from "jsonc-parser";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -188,16 +189,18 @@ function backupConflictingFiles(conflicts: ConflictReport["files"], targetDir: s
 // ── JSON/JSONC helpers ──────────────────────────────────────────────────
 
 /**
- * Minimal JSONC parser: strips comments and parses as JSON.
+ * Parse JSON or JSONC text into an object.
+ * Uses jsonc-parser which correctly handles // in URLs, comments, and trailing commas.
  */
 function parseJsonc(text: string): Record<string, unknown> {
-  // Strip single-line comments
-  const noComments = text.replace(/\/\/.*$/gm, "");
-  // Strip multi-line comments
-  const noBlockComments = noComments.replace(/\/\*[\s\S]*?\*\//g, "");
-  // Trailing comma in last object entry
-  const clean = noBlockComments.replace(/,(\s*[}\]])/g, "$1");
-  return JSON.parse(clean);
+  const result = parseJsoncSafe(text);
+  if (result === undefined) {
+    throw new Error("Failed to parse JSON/JSONC: result is undefined (file may be empty or invalid)");
+  }
+  if (typeof result !== "object" || result === null || Array.isArray(result)) {
+    throw new Error("Expected JSON/JSONC root to be an object");
+  }
+  return result as Record<string, unknown>;
 }
 
 /**
