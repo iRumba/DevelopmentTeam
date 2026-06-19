@@ -124,6 +124,20 @@ function scanConflicts(templatePath: string, targetDir: string): ConflictReport 
     }
   }
 
+  // Also detect opencode.json (old format — template only has .jsonc)
+  const jsonConfigPath = resolve(targetDir, "opencode.json");
+  if (existsSync(jsonConfigPath)) {
+    // Only add if not already detected via opencode.jsonc
+    const alreadyDetected = conflicts.some(c => c.relativePath === "opencode.jsonc" || c.relativePath === "opencode.json");
+    if (!alreadyDetected) {
+      conflicts.push({
+        relativePath: "opencode.json",
+        category: "root-config",
+        action: "merge-config",
+      });
+    }
+  }
+
   // Check dot-opencode/ files against target's .opencode/
   const dotOpenSrc = resolve(templatePath, "dot-opencode");
   if (existsSync(dotOpenSrc)) {
@@ -312,25 +326,44 @@ export function runInit(options: InitOptions): void {
   const configDest = resolve(targetDir, "opencode.jsonc");
 
   if (configConflict) {
-    // Try opencode.json or opencode.jsonc
-    const existingConfigPath = existsSync(resolve(targetDir, "opencode.jsonc"))
-      ? resolve(targetDir, "opencode.jsonc")
-      : existsSync(resolve(targetDir, "opencode.json"))
-        ? resolve(targetDir, "opencode.json")
-        : null;
+    // Collect all existing config files
+    const existingConfigs: { path: string; content: string }[] = [];
 
-    if (existingConfigPath) {
+    const jsoncPath = resolve(targetDir, "opencode.jsonc");
+    const jsonPath = resolve(targetDir, "opencode.json");
+
+    if (existsSync(jsoncPath)) {
+      existingConfigs.push({ path: jsoncPath, content: readFileSync(jsoncPath, "utf-8") });
+    }
+    if (existsSync(jsonPath)) {
+      existingConfigs.push({ path: jsonPath, content: readFileSync(jsonPath, "utf-8") });
+    }
+
+    if (existingConfigs.length > 0) {
       console.log("  Merging opencode configuration...");
       const templateConfig = readFileSync(resolve(templatePath, "opencode.jsonc"), "utf-8");
-      const existingConfig = readFileSync(existingConfigPath, "utf-8");
-      const merged = mergeOpencodeConfig(templateConfig, existingConfig);
+
+      // If multiple existing configs, merge them together first
+      let existingContent: string;
+      if (existingConfigs.length === 1) {
+        existingContent = existingConfigs[0].content;
+      } else {
+        // Merge existing: jsonc takes priority over json
+        const jsonObj = parseJsonc(existingConfigs.find(c => c.path.endsWith(".json"))?.content || "{}");
+        const jsoncObj = parseJsonc(existingConfigs.find(c => c.path.endsWith(".jsonc"))?.content || "{}");
+        const mergedExisting = { ...jsonObj, ...jsoncObj };
+        existingContent = JSON.stringify(mergedExisting, null, 2);
+      }
+
+      const merged = mergeOpencodeConfig(templateConfig, existingContent);
       writeFileSync(configDest, merged, "utf-8");
       console.log(`  Created ${configDest} (merged)`);
 
-      // If the existing was opencode.json, remove it to avoid confusion
-      if (existingConfigPath !== configDest) {
-        // It's already backed up in .opencode.old/
-        renameSync(existingConfigPath, existingConfigPath + ".bak");
+      // Rename non-.jsonc config files (they're already backed up in .opencode.old/)
+      for (const ec of existingConfigs) {
+        if (ec.path !== configDest) {
+          renameSync(ec.path, ec.path + ".bak");
+        }
       }
     }
   }
