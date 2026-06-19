@@ -206,7 +206,7 @@ function parseJsonc(text: string): Record<string, unknown> {
 /**
  * Deep merge opencode configuration.
  * Rules:
- * - agents: overwrite agents with same names, keep others
+ * - agent: overwrite agents with same names, keep others
  * - permissions: overwrite
  * - instructions: append ours, warn about conflicts
  * - mcp: add ours if not already present
@@ -220,18 +220,18 @@ function mergeOpencodeConfig(templateText: string, existingText: string): string
   // Merge top-level keys
   const result: Record<string, unknown> = { ...existing };
 
-  // Agents: overwrite matching names, keep non-matching
-  if (template.agents && typeof template.agents === "object" && !Array.isArray(template.agents)) {
-    const templateAgents = template.agents as Record<string, unknown>;
-    if (!result.agents || typeof result.agents !== "object" || Array.isArray(result.agents)) {
-      result.agents = {};
+  // Agent: overwrite matching names, keep non-matching
+  if (template.agent && typeof template.agent === "object" && !Array.isArray(template.agent)) {
+    const templateAgent = template.agent as Record<string, unknown>;
+    if (!result.agent || typeof result.agent !== "object" || Array.isArray(result.agent)) {
+      result.agent = {};
     }
-    const existingAgents = result.agents as Record<string, unknown>;
-    for (const [name, config] of Object.entries(templateAgents)) {
-      if (existingAgents[name]) {
+    const existingAgent = result.agent as Record<string, unknown>;
+    for (const [name, config] of Object.entries(templateAgent)) {
+      if (existingAgent[name]) {
         console.log(`    Agent "${name}" will be overwritten with DevelopmentTeam version`);
       }
-      existingAgents[name] = config;
+      existingAgent[name] = config;
     }
   }
 
