@@ -90,6 +90,15 @@ Running `dev-team init` creates:
 - **secrets-guidelines** — Secret management rules and documentation standards
 - **json-manipulation** — Safe JSON/JSONC file manipulation via MCP tools
 
+## Built-In Plugins
+
+| Plugin | Description |
+|--------|-------------|
+| **workspace-plugin** | Plan management — save/read plans with schema validation, track coder tasks, trigger code review reminders, persist plans across session compaction |
+| **background-agents** | Async delegation — launch background research/exploration tasks and continue working; results are retrievable via delegation_read |
+| **notify** | Desktop notifications — sends native OS notifications (macOS notification center, Windows toast, etc.) and updates terminal title on session events |
+| **worktree** | Git worktree isolation — create disposable worktree branches for experimental changes; SQLite-backed state persistence with auto-cleanup |
+
 ## Orchestrator Architecture
 
 The `build` agent acts as the team orchestrator. It:

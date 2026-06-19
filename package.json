@@ -24,6 +24,18 @@
     "orchestrator"
   ],
   "license": "MIT",
+  "dependencies": {
+    "@kilocode/plugin": "7.3.45",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@opencode-ai/plugin": "1.15.5",
+    "@opencode-ai/sdk": "^1.0.0",
+    "@slkiser/opencode-quota": "3.8.7",
+    "detect-terminal": "2.0.0",
+    "jsonc-parser": "3.3.1",
+    "node-notifier": "10.0.1",
+    "unique-names-generator": "4.7.1",
+    "zod": "4.3.5"
+  },
   "devDependencies": {
     "typescript": "^5.5.0",
     "@types/node": "^20.0.0"

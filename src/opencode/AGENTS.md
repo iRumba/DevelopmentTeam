@@ -28,3 +28,12 @@ Before writing any code, agents MUST load the relevant philosophy skill:
 - Code changes → delegate to `coder`
 - Documentation → delegate to `scribe`
 - Code review → delegate to `reviewer`
+
+## Built-In Plugins
+
+| Plugin | Description |
+|--------|-------------|
+| `workspace-plugin` | Plan management with save/read, coder task tracking, review reminders, plan persistence across compaction |
+| `background-agents` | Async delegation system — allows parallel background work with persistent, retrievable output |
+| `notify` | Native OS desktop notifications and terminal title updates |
+| `worktree` | Git worktree session isolation — create, manage, and track worktree branches |
