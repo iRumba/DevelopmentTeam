@@ -167,15 +167,6 @@
     }
   },
   "mcp": {
-    "github": {
-      "type": "remote",
-      "url": "https://api.github.com/mcp",
-      "enabled": true,
-      "headers": {
-        "Authorization": "Bearer {env:GITHUB_TOKEN}",
-        "User-Agent": "opencode-dev-team/1.0"
-      }
-    },
     "jsonc": {
       "type": "local",
       "command": ["node", "./.opencode/plugins/jsonc-mcp-server.cjs"],

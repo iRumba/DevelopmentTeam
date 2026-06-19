@@ -40,23 +40,6 @@ If the file doesn't exist, create it with `{"version":1,"secrets":[]}`.
 
 Record structure:
 
-```json
-{
-  "id": "github-api-key",
-  "resource": "github",
-  "display_name": "GitHub API Key",
-  "type": "env",
-  "location": "GITHUB_TOKEN",
-  "purpose": "Authentication for GitHub API (Issues, PR, repositories)",
-  "permissions": "full",
-  "lifetime": "permanent",
-  "status": "active",
-  "notes": "",
-  "created": "2026-06-18",
-  "updated": "2026-06-18"
-}
-```
-
 ## Cascading Resolution (mandatory algorithm for all modes)
 
 When searching for a secret, follow this chain. Move to the next step

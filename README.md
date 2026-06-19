@@ -112,7 +112,6 @@ The `build` agent acts as the team orchestrator. It:
 
 - [opencode](https://opencode.ai) installed
 - Node.js >= 18
-- For GitHub MCP: `GITHUB_TOKEN` environment variable set
 
 ## Development
 
