@@ -6,7 +6,7 @@ import {
   readFileSync,
   mkdirSync,
   readdirSync,
-  renameSync,
+  unlinkSync,
 } from "node:fs";
 import { resolve, dirname, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -362,10 +362,10 @@ export function runInit(options: InitOptions): void {
       writeFileSync(configDest, merged, "utf-8");
       console.log(`  Created ${configDest} (merged)`);
 
-      // Rename non-.jsonc config files (they're already backed up in .opencode.old/)
+      // Delete non-.jsonc config files (already backed up in .opencode.old/)
       for (const ec of existingConfigs) {
         if (ec.path !== configDest) {
-          renameSync(ec.path, ec.path + ".bak");
+          unlinkSync(ec.path);
         }
       }
     }
