@@ -1,5 +1,15 @@
-import { existsSync, cpSync, writeFileSync, appendFileSync, readFileSync } from "node:fs";
-import { resolve, dirname } from "node:path";
+import {
+  existsSync,
+  cpSync,
+  writeFileSync,
+  appendFileSync,
+  readFileSync,
+  mkdirSync,
+  readdirSync,
+  statSync,
+  renameSync,
+} from "node:fs";
+import { resolve, dirname, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
 
@@ -9,16 +19,16 @@ const __dirname = dirname(__filename);
 export interface InitOptions {
   git: boolean;
   ignore: boolean;
+  force: boolean;
 }
 
-/**
- * Resolve the path to the opencode template directory.
- * Works both when installed as a package and during development.
- */
+// ── Template resolution ──────────────────────────────────────────────────
+
 function resolveTemplatePath(): string {
+  // Check installed mode first (dist/opencode/), then dev mode (src/opencode/)
   const candidates = [
-    resolve(__dirname, "..", "opencode"),               // dist/opencode/ (installed package)
-    resolve(__dirname, "..", "..", "src", "opencode"),  // src/opencode/ (development)
+    resolve(__dirname, "..", "opencode"),
+    resolve(__dirname, "..", "..", "src", "opencode"),
   ];
 
   for (const candidate of candidates) {
@@ -34,68 +44,375 @@ function resolveTemplatePath(): string {
   process.exit(1);
 }
 
+// ── File enumeration ────────────────────────────────────────────────────
+
+interface TemplateFile {
+  /** Relative path from project root (e.g., ".opencode/agents/build.md") */
+  relativePath: string;
+  /** Absolute source path in template */
+  sourcePath: string;
+  /** Absolute destination path in target project */
+  destPath: string;
+  /** Category for merge logic */
+  category: "root-config" | "root-doc" | "agent" | "skill" | "plugin" | "command" | "tool" | "other";
+}
+
 /**
- * Deploy the development team in the current working directory.
+ * Recursively enumerate all files in a directory with their relative paths.
  */
-export function runInit(options: InitOptions): void {
-  const targetDir = process.cwd();
-  const templatePath = resolveTemplatePath();
-  const destPath = resolve(targetDir, ".opencode");
+function enumerateFiles(dir: string, prefix: string = ""): TemplateFile[] {
+  const results: TemplateFile[] = [];
+  if (!existsSync(dir)) return results;
 
-  // --- Check if .opencode already exists ---
-  if (existsSync(destPath)) {
-    console.error(`Error: ${destPath} already exists.`);
-    console.error("DevelopmentTeam cannot be deployed over an existing .opencode directory.");
-    process.exit(1);
+  const entries = readdirSync(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const fullPath = resolve(dir, entry.name);
+    const relPath = prefix ? `${prefix}/${entry.name}` : entry.name;
+
+    if (entry.isDirectory()) {
+      results.push(...enumerateFiles(fullPath, relPath));
+    } else {
+      const category = determineCategory(relPath);
+      results.push({
+        relativePath: relPath,
+        sourcePath: fullPath,
+        destPath: fullPath, // will be resolved to target later
+        category,
+      });
+    }
   }
+  return results;
+}
 
-  // --- Check if opencode.jsonc already exists ---
-  const configPath = resolve(targetDir, "opencode.jsonc");
-  if (existsSync(configPath)) {
-    console.error(`Error: ${configPath} already exists.`);
-    console.error("DevelopmentTeam cannot be deployed over an existing opencode configuration.");
-    process.exit(1);
-  }
+function determineCategory(relPath: string): TemplateFile["category"] {
+  if (relPath === "opencode.json" || relPath === "opencode.jsonc") return "root-config";
+  if (relPath === "AGENTS.md") return "root-doc";
+  if (relPath.startsWith("agents/")) return "agent";
+  if (relPath.startsWith("skills/")) return "skill";
+  if (relPath.startsWith("plugins/")) return "plugin";
+  if (relPath.startsWith("commands/")) return "command";
+  if (relPath.startsWith("tools/")) return "tool";
+  return "other";
+}
 
-  // --- Copy template files ---
-  console.log("Deploying DevelopmentTeam...");
+// ── Conflict detection ──────────────────────────────────────────────────
 
-  // Copy opencode.jsonc to project root
-  const sourceConfig = resolve(templatePath, "opencode.jsonc");
-  if (existsSync(sourceConfig)) {
-    const config = readFileSync(sourceConfig, "utf-8");
-    writeFileSync(configPath, config, "utf-8");
-    console.log(`  Created ${configPath}`);
-  }
+interface ConflictReport {
+  hasConflicts: boolean;
+  files: {
+    relativePath: string;
+    category: TemplateFile["category"];
+    action: "overwrite" | "merge-config" | "merge-package";
+  }[];
+}
 
-  // Copy AGENTS.md to project root
-  const sourceAgents = resolve(templatePath, "AGENTS.md");
-  if (existsSync(sourceAgents)) {
-    const agents = readFileSync(sourceAgents, "utf-8");
-    writeFileSync(resolve(targetDir, "AGENTS.md"), agents, "utf-8");
-    console.log(`  Created ${resolve(targetDir, "AGENTS.md")}`);
-  }
+function scanConflicts(templatePath: string, targetDir: string): ConflictReport {
+  const conflicts: ConflictReport["files"] = [];
 
-  // Copy .opencode/ directory
-  const sourceDotOpen = resolve(templatePath, "dot-opencode");
-  if (existsSync(sourceDotOpen)) {
-    cpSync(sourceDotOpen, destPath, { recursive: true });
-    console.log(`  Created ${destPath}`);
-  }
-
-  // --- Install jsonc MCP dependencies ---
-  const pluginsPackageJson = resolve(destPath, "plugins", "package.json");
-  if (existsSync(pluginsPackageJson)) {
-    console.log("  Installing jsonc MCP server dependencies...");
-    try {
-      execSync("npm install", { cwd: resolve(destPath, "plugins"), stdio: "pipe" });
-      console.log("  Installed jsonc MCP dependencies");
-    } catch {
-      console.warn("  Warning: npm install failed in .opencode/plugins/ — jsonc MCP may not work");
+  // Check root-level template files
+  const rootEntries = readdirSync(templatePath, { withFileTypes: true });
+  for (const entry of rootEntries) {
+    if (entry.name === "dot-opencode") continue;
+    const relPath = entry.name;
+    const destPath = resolve(targetDir, relPath);
+    if (existsSync(destPath)) {
+      const category = determineCategory(relPath);
+      conflicts.push({
+        relativePath: relPath,
+        category,
+        action: category === "root-config" ? "merge-config" : "overwrite",
+      });
     }
   }
 
-  // --- Git init ---
+  // Check dot-opencode/ files against target's .opencode/
+  const dotOpenSrc = resolve(templatePath, "dot-opencode");
+  if (existsSync(dotOpenSrc)) {
+    const templateFiles = enumerateFiles(dotOpenSrc);
+    for (const tf of templateFiles) {
+      const destPath = resolve(targetDir, ".opencode", tf.relativePath);
+      if (existsSync(destPath)) {
+        conflicts.push({
+          relativePath: `.opencode/${tf.relativePath}`,
+          category: tf.category,
+          action: (["root-config", "root-doc"].includes(tf.category))
+            ? "merge-config"
+            : "overwrite",
+        });
+      }
+    }
+  }
+
+  return {
+    hasConflicts: conflicts.length > 0,
+    files: conflicts,
+  };
+}
+
+// ── Backup ──────────────────────────────────────────────────────────────
+
+function backupConflictingFiles(conflicts: ConflictReport["files"], targetDir: string): string {
+  const backupDir = resolve(targetDir, ".opencode.old");
+  if (!existsSync(backupDir)) {
+    mkdirSync(backupDir, { recursive: true });
+  }
+
+  for (const conflict of conflicts) {
+    const sourcePath = resolve(targetDir, conflict.relativePath);
+    const backupPath = resolve(backupDir, conflict.relativePath);
+    const backupDirPath = dirname(backupPath);
+    if (!existsSync(backupDirPath)) {
+      mkdirSync(backupDirPath, { recursive: true });
+    }
+    // Use copy for safety — the original will be overwritten later
+    cpSync(sourcePath, backupPath, { recursive: false, errorOnExist: false });
+    console.log(`  Backed up: ${conflict.relativePath} -> .opencode.old/`);
+  }
+
+  return backupDir;
+}
+
+// ── JSON/JSONC helpers ──────────────────────────────────────────────────
+
+/**
+ * Minimal JSONC parser: strips comments and parses as JSON.
+ */
+function parseJsonc(text: string): Record<string, unknown> {
+  // Strip single-line comments
+  const noComments = text.replace(/\/\/.*$/gm, "");
+  // Strip multi-line comments
+  const noBlockComments = noComments.replace(/\/\*[\s\S]*?\*\//g, "");
+  // Trailing comma in last object entry
+  const clean = noBlockComments.replace(/,(\s*[}\]])/g, "$1");
+  return JSON.parse(clean);
+}
+
+/**
+ * Deep merge opencode configuration.
+ * Rules:
+ * - agents: overwrite agents with same names, keep others
+ * - permissions: overwrite
+ * - instructions: append ours, warn about conflicts
+ * - mcp: add ours if not already present
+ * - plugin: add ours if not already present
+ * - everything else: keep existing
+ */
+function mergeOpencodeConfig(templateText: string, existingText: string): string {
+  const template = parseJsonc(templateText);
+  const existing = parseJsonc(existingText);
+
+  // Merge top-level keys
+  const result: Record<string, unknown> = { ...existing };
+
+  // Agents: overwrite matching names, keep non-matching
+  if (template.agents && typeof template.agents === "object" && !Array.isArray(template.agents)) {
+    const templateAgents = template.agents as Record<string, unknown>;
+    if (!result.agents || typeof result.agents !== "object" || Array.isArray(result.agents)) {
+      result.agents = {};
+    }
+    const existingAgents = result.agents as Record<string, unknown>;
+    for (const [name, config] of Object.entries(templateAgents)) {
+      if (existingAgents[name]) {
+        console.log(`    Agent "${name}" will be overwritten with DevelopmentTeam version`);
+      }
+      existingAgents[name] = config;
+    }
+  }
+
+  // Permissions: overwrite with ours
+  if (template.permission) {
+    console.log("    Permissions will be overwritten with DevelopmentTeam defaults");
+    result.permission = template.permission;
+  }
+
+  // MCP: add ours if not present
+  if (template.mcp && typeof template.mcp === "object" && !Array.isArray(template.mcp)) {
+    const templateMcp = template.mcp as Record<string, unknown>;
+    if (!result.mcp || typeof result.mcp !== "object" || Array.isArray(result.mcp)) {
+      result.mcp = {};
+    }
+    const existingMcp = result.mcp as Record<string, unknown>;
+    for (const [name, config] of Object.entries(templateMcp)) {
+      if (!existingMcp[name]) {
+        existingMcp[name] = config;
+      }
+    }
+  }
+
+  // Plugins: append ours if not already present
+  if (Array.isArray(template.plugin)) {
+    if (!Array.isArray(result.plugin)) {
+      result.plugin = [];
+    }
+    const existingPlugins = result.plugin as string[];
+    const templatePlugins = template.plugin as string[];
+    for (const p of templatePlugins) {
+      if (!existingPlugins.includes(p)) {
+        existingPlugins.push(p);
+      }
+    }
+  }
+
+  // Instructions: append ours, warn
+  if (Array.isArray(template.instructions)) {
+    const existingInstructions = Array.isArray(result.instructions)
+      ? (result.instructions as string[])
+      : [];
+    const templateInstructions = template.instructions as string[];
+    const newInstructions = templateInstructions.filter(
+      (i: string) => !existingInstructions.includes(i)
+    );
+    if (newInstructions.length > 0) {
+      console.log("  Warning: Existing instructions may conflict with DevelopmentTeam team behavior.");
+      console.log(`      DevelopmentTeam adds: ${newInstructions.join(", ")}`);
+      result.instructions = [...existingInstructions, ...newInstructions];
+    }
+  }
+
+  // Return the merged result as formatted JSON
+  return JSON.stringify(result, null, 2) + "\n";
+}
+
+// ── Deploy ──────────────────────────────────────────────────────────────
+
+/**
+ * Copy all template files to the target project.
+ * Root files go to project root, dot-opencode/ goes to .opencode/.
+ */
+function deployTemplateFiles(templatePath: string, targetDir: string): void {
+  // Copy root-level files (opencode.jsonc, AGENTS.md)
+  const rootEntries = readdirSync(templatePath, { withFileTypes: true });
+  for (const entry of rootEntries) {
+    if (entry.name === "dot-opencode") continue;
+    if (!entry.isFile()) continue;
+    const src = resolve(templatePath, entry.name);
+    const dst = resolve(targetDir, entry.name);
+    const content = readFileSync(src, "utf-8");
+    writeFileSync(dst, content, "utf-8");
+    console.log(`  Created ${dst}`);
+  }
+
+  // Copy dot-opencode/ -> .opencode/
+  const dotOpenSrc = resolve(templatePath, "dot-opencode");
+  const dotOpenDst = resolve(targetDir, ".opencode");
+  if (existsSync(dotOpenSrc)) {
+    // Remove existing .opencode/ first to ensure clean overwrite
+    // (backup already made if force mode)
+    cpSync(dotOpenSrc, dotOpenDst, { recursive: true, force: true });
+    console.log(`  Created ${dotOpenDst}`);
+  }
+}
+
+// ── Main ────────────────────────────────────────────────────────────────
+
+export function runInit(options: InitOptions): void {
+  const targetDir = process.cwd();
+  const templatePath = resolveTemplatePath();
+
+  // ── Phase 1: Scan conflicts ──
+  console.log("Scanning for existing files...");
+  const conflictReport = scanConflicts(templatePath, targetDir);
+
+  if (conflictReport.hasConflicts) {
+    console.log("\nThe following files already exist and will be affected:\n");
+    for (const cf of conflictReport.files) {
+      const actionLabel =
+        cf.action === "overwrite" ? "OVERWRITE" :
+        cf.action === "merge-config" ? "MERGE" :
+        "MERGE";
+      console.log(`  [${actionLabel}] ${cf.relativePath}`);
+    }
+
+    if (!options.force) {
+      console.log("\nUse --force to proceed with automatic backup and merge.");
+      console.log("  dev-team init --force [--git] [--ignore]");
+      process.exit(1);
+    }
+
+    // Phase 2: Backup
+    console.log("\nCreating backup in .opencode.old/ ...");
+    const backupDir = backupConflictingFiles(conflictReport.files, targetDir);
+    console.log(`  Backup created at ${backupDir}`);
+  }
+
+  // ── Phase 3: Handle opencode config merge ──
+  const configConflict = conflictReport.files.find(
+    (f) => f.category === "root-config"
+  );
+
+  const configDest = resolve(targetDir, "opencode.jsonc");
+
+  if (configConflict) {
+    // Try opencode.json or opencode.jsonc
+    const existingConfigPath = existsSync(resolve(targetDir, "opencode.jsonc"))
+      ? resolve(targetDir, "opencode.jsonc")
+      : existsSync(resolve(targetDir, "opencode.json"))
+        ? resolve(targetDir, "opencode.json")
+        : null;
+
+    if (existingConfigPath) {
+      console.log("  Merging opencode configuration...");
+      const templateConfig = readFileSync(resolve(templatePath, "opencode.jsonc"), "utf-8");
+      const existingConfig = readFileSync(existingConfigPath, "utf-8");
+      const merged = mergeOpencodeConfig(templateConfig, existingConfig);
+      writeFileSync(configDest, merged, "utf-8");
+      console.log(`  Created ${configDest} (merged)`);
+
+      // If the existing was opencode.json, remove it to avoid confusion
+      if (existingConfigPath !== configDest) {
+        // It's already backed up in .opencode.old/
+        renameSync(existingConfigPath, existingConfigPath + ".bak");
+      }
+    }
+  } else {
+    // No existing config — just deploy
+    deployTemplateFiles(templatePath, targetDir);
+  }
+
+  // ── Phase 4: Merge package.json ──
+  const pkgDest = resolve(targetDir, "package.json");
+  if (existsSync(pkgDest)) {
+    console.log("  Merging package.json dependencies...");
+    try {
+      const existingPkg = JSON.parse(readFileSync(pkgDest, "utf-8"));
+      const templatePkgPath = resolve(templatePath, "dot-opencode", "plugins", "package.json");
+      if (existsSync(templatePkgPath)) {
+        const templatePkg = JSON.parse(readFileSync(templatePkgPath, "utf-8"));
+        if (templatePkg.dependencies) {
+          existingPkg.dependencies = {
+            ...(existingPkg.dependencies || {}),
+            ...templatePkg.dependencies,
+          };
+          writeFileSync(pkgDest, JSON.stringify(existingPkg, null, 2) + "\n", "utf-8");
+          console.log(`  Updated ${pkgDest} with DevelopmentTeam dependencies`);
+        }
+      }
+    } catch {
+      console.warn("  Warning: Could not parse existing package.json, skipping merge");
+    }
+  }
+
+  // ── Phase 5: Deploy .opencode/ files (overwrite agents, skills, plugins, etc.) ──
+  const dotOpenSrc = resolve(templatePath, "dot-opencode");
+  const dotOpenDst = resolve(targetDir, ".opencode");
+  if (existsSync(dotOpenSrc)) {
+    cpSync(dotOpenSrc, dotOpenDst, { recursive: true, force: true });
+    console.log(`  Updated ${dotOpenDst}`);
+  }
+
+  // ── Phase 6: Install dependencies ──
+  const pluginsPackageJson = resolve(dotOpenDst, "plugins", "package.json");
+  if (existsSync(pluginsPackageJson)) {
+    console.log("  Installing jsonc MCP server dependencies...");
+    try {
+      execSync("npm install", { cwd: resolve(dotOpenDst, "plugins"), stdio: "pipe" });
+      console.log("  Installed jsonc MCP dependencies");
+    } catch {
+      console.warn("  Warning: npm install failed in .opencode/plugins/ -- jsonc MCP may not work");
+    }
+  }
+
+  // ── Phase 7: Git init ──
   if (options.git) {
     try {
       execSync("git init", { cwd: targetDir, stdio: "pipe" });
@@ -105,12 +422,12 @@ export function runInit(options: InitOptions): void {
     }
   }
 
-  // --- .gitignore ---
+  // ── Phase 8: .gitignore ──
   if (options.ignore) {
     const gitignorePath = resolve(targetDir, ".gitignore");
     const entries = [
       "",
-      "# DevelopmentTeam — AI agent team files",
+      "# DevelopmentTeam -- AI agent team files",
       ".opencode/",
       "opencode.jsonc",
       "AGENTS.md",
@@ -126,4 +443,23 @@ export function runInit(options: InitOptions): void {
 
   console.log("\nDevelopmentTeam deployed successfully!");
   console.log("Restart opencode to activate the team.");
+}
+
+export function showHelp(): void {
+  console.log(`Usage: dev-team [command] [options]
+
+Commands:
+  init        Deploy DevelopmentTeam in the current directory
+  help        Show this help message
+
+Options for init:
+  --git       Initialize a git repository after deployment
+  --ignore    Add team files to .gitignore (use with --git)
+  --force     Overwrite existing files (creates backup in .opencode.old/)
+
+Examples:
+  dev-team init
+  dev-team init --git
+  dev-team init --force --git --ignore
+`);
 }
