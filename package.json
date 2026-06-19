@@ -11,7 +11,7 @@
     "src/opencode"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node -e \"const{cpSync,existsSync,mkdirSync}=require('fs');const{resolve}=require('path');const src=resolve('src/opencode');const dst=resolve('dist/opencode');if(existsSync(dst))require('fs').rmSync(dst,{recursive:true});mkdirSync(dst,{recursive:true});cpSync(src,dst,{recursive:true});console.log('Template copied to dist/opencode/')\"",
     "prepublishOnly": "npm run build",
     "watch": "tsc --watch"
   },

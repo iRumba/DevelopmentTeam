@@ -17,18 +17,20 @@ export interface InitOptions {
  */
 function resolveTemplatePath(): string {
   const candidates = [
-    resolve(__dirname, "..", "opencode"),
-    resolve(__dirname, "..", "..", "src", "opencode"),
+    resolve(__dirname, "..", "opencode"),               // dist/opencode/ (installed package)
+    resolve(__dirname, "..", "..", "src", "opencode"),  // src/opencode/ (development)
   ];
 
   for (const candidate of candidates) {
-    if (existsSync(candidate)) {
+    const configPath = resolve(candidate, "opencode.jsonc");
+    if (existsSync(candidate) && existsSync(configPath)) {
       return candidate;
     }
   }
 
   console.error("Error: Could not find DevelopmentTeam template files.");
   console.error("Expected at:", candidates.join(" or "));
+  console.error("Make sure the package is properly installed.");
   process.exit(1);
 }
 
