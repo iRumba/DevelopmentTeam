@@ -83,6 +83,35 @@ export function runInit(options: InitOptions): void {
     console.log(`  Created ${destPath}`);
   }
 
+  // --- package.json and dependencies ---
+  const packageTemplatePath = resolve(templatePath, "package.template.json");
+  const packageJsonPath = resolve(targetDir, "package.json");
+
+  if (existsSync(packageTemplatePath)) {
+    const templateDeps = JSON.parse(readFileSync(packageTemplatePath, "utf-8")).dependencies;
+
+    if (existsSync(packageJsonPath)) {
+      // Merge with existing package.json
+      const existing = JSON.parse(readFileSync(packageJsonPath, "utf-8"));
+      existing.dependencies = { ...existing.dependencies, ...templateDeps };
+      writeFileSync(packageJsonPath, JSON.stringify(existing, null, 2) + "\n", "utf-8");
+      console.log(`  Updated ${packageJsonPath} with jsonc-parser dependency`);
+    } else {
+      // Create new package.json from template
+      const pkg = JSON.parse(readFileSync(packageTemplatePath, "utf-8"));
+      writeFileSync(packageJsonPath, JSON.stringify(pkg, null, 2) + "\n", "utf-8");
+      console.log(`  Created ${packageJsonPath}`);
+    }
+  }
+
+  // Install dependencies
+  try {
+    execSync("npm install", { cwd: targetDir, stdio: "pipe" });
+    console.log("  Installed dependencies (npm install)");
+  } catch {
+    console.warn("  Warning: npm install failed — run 'npm install' manually");
+  }
+
   // --- Git init ---
   if (options.git) {
     try {
