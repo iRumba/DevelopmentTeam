@@ -143,6 +143,9 @@
       "permission": {
         "edit": "deny",
         "write": "deny",
+        "read": "deny",
+        "glob": "deny",
+        "grep": "deny",
         "bash": { "*": "deny", "git worktree *": "allow" },
         "task": "allow"
       }
