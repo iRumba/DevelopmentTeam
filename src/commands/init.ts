@@ -6,7 +6,6 @@ import {
   readFileSync,
   mkdirSync,
   readdirSync,
-  statSync,
   renameSync,
 } from "node:fs";
 import { resolve, dirname, relative } from "node:path";
@@ -273,36 +272,6 @@ function mergeOpencodeConfig(templateText: string, existingText: string): string
   return JSON.stringify(result, null, 2) + "\n";
 }
 
-// ── Deploy ──────────────────────────────────────────────────────────────
-
-/**
- * Copy all template files to the target project.
- * Root files go to project root, dot-opencode/ goes to .opencode/.
- */
-function deployTemplateFiles(templatePath: string, targetDir: string): void {
-  // Copy root-level files (opencode.jsonc, AGENTS.md)
-  const rootEntries = readdirSync(templatePath, { withFileTypes: true });
-  for (const entry of rootEntries) {
-    if (entry.name === "dot-opencode") continue;
-    if (!entry.isFile()) continue;
-    const src = resolve(templatePath, entry.name);
-    const dst = resolve(targetDir, entry.name);
-    const content = readFileSync(src, "utf-8");
-    writeFileSync(dst, content, "utf-8");
-    console.log(`  Created ${dst}`);
-  }
-
-  // Copy dot-opencode/ -> .opencode/
-  const dotOpenSrc = resolve(templatePath, "dot-opencode");
-  const dotOpenDst = resolve(targetDir, ".opencode");
-  if (existsSync(dotOpenSrc)) {
-    // Remove existing .opencode/ first to ensure clean overwrite
-    // (backup already made if force mode)
-    cpSync(dotOpenSrc, dotOpenDst, { recursive: true, force: true });
-    console.log(`  Created ${dotOpenDst}`);
-  }
-}
-
 // ── Main ────────────────────────────────────────────────────────────────
 
 export function runInit(options: InitOptions): void {
@@ -364,12 +333,24 @@ export function runInit(options: InitOptions): void {
         renameSync(existingConfigPath, existingConfigPath + ".bak");
       }
     }
-  } else {
-    // No existing config — just deploy
-    deployTemplateFiles(templatePath, targetDir);
   }
 
-  // ── Phase 4: Merge package.json ──
+  // ── Phase 4: Deploy root-level template files ──
+  // Deploy all root-level files (AGENTS.md, etc.) except opencode.jsonc which was already merged
+  const rootEntries = readdirSync(templatePath, { withFileTypes: true });
+  for (const entry of rootEntries) {
+    if (entry.name === "dot-opencode") continue;
+    if (!entry.isFile()) continue;
+    // If we merged config, skip opencode.jsonc — already handled
+    if (configConflict && entry.name === "opencode.jsonc") continue;
+    const src = resolve(templatePath, entry.name);
+    const dst = resolve(targetDir, entry.name);
+    const content = readFileSync(src, "utf-8");
+    writeFileSync(dst, content, "utf-8");
+    console.log(`  Created ${dst}`);
+  }
+
+  // ── Phase 5: Merge package.json ──
   const pkgDest = resolve(targetDir, "package.json");
   if (existsSync(pkgDest)) {
     console.log("  Merging package.json dependencies...");
@@ -392,7 +373,7 @@ export function runInit(options: InitOptions): void {
     }
   }
 
-  // ── Phase 5: Deploy .opencode/ files (overwrite agents, skills, plugins, etc.) ──
+  // ── Phase 6: Deploy .opencode/ files (overwrite agents, skills, plugins, etc.) ──
   const dotOpenSrc = resolve(templatePath, "dot-opencode");
   const dotOpenDst = resolve(targetDir, ".opencode");
   if (existsSync(dotOpenSrc)) {
@@ -400,7 +381,7 @@ export function runInit(options: InitOptions): void {
     console.log(`  Updated ${dotOpenDst}`);
   }
 
-  // ── Phase 6: Install dependencies ──
+  // ── Phase 7: Install dependencies ──
   const pluginsPackageJson = resolve(dotOpenDst, "plugins", "package.json");
   if (existsSync(pluginsPackageJson)) {
     console.log("  Installing jsonc MCP server dependencies...");
@@ -412,7 +393,7 @@ export function runInit(options: InitOptions): void {
     }
   }
 
-  // ── Phase 7: Git init ──
+  // ── Phase 8: Git init ──
   if (options.git) {
     try {
       execSync("git init", { cwd: targetDir, stdio: "pipe" });
@@ -422,7 +403,7 @@ export function runInit(options: InitOptions): void {
     }
   }
 
-  // ── Phase 8: .gitignore ──
+  // ── Phase 9: .gitignore ──
   if (options.ignore) {
     const gitignorePath = resolve(targetDir, ".gitignore");
     const entries = [
