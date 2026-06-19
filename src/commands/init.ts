@@ -166,7 +166,16 @@ function scanConflicts(templatePath: string, targetDir: string): ConflictReport 
 // ── Backup ──────────────────────────────────────────────────────────────
 
 function backupConflictingFiles(conflicts: ConflictReport["files"], targetDir: string): string {
-  const backupDir = resolve(targetDir, ".opencode.old");
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const MM = String(now.getMonth() + 1).padStart(2, "0");
+  const dd = String(now.getDate()).padStart(2, "0");
+  const hh = String(now.getHours()).padStart(2, "0");
+  const mm = String(now.getMinutes()).padStart(2, "0");
+  const ss = String(now.getSeconds()).padStart(2, "0");
+  const timestamp = `${yyyy}_${MM}_${dd}_${hh}_${mm}_${ss}`;
+  const backupDir = resolve(targetDir, ".opencode", ".dev-team_backups", timestamp);
+
   if (!existsSync(backupDir)) {
     mkdirSync(backupDir, { recursive: true });
   }
@@ -180,7 +189,7 @@ function backupConflictingFiles(conflicts: ConflictReport["files"], targetDir: s
     }
     // Use copy for safety — the original will be overwritten later
     cpSync(sourcePath, backupPath, { recursive: false, errorOnExist: false });
-    console.log(`  Backed up: ${conflict.relativePath} -> .opencode.old/`);
+    console.log(`  Backed up: ${conflict.relativePath} -> .opencode/.dev-team_backups/${timestamp}/`);
   }
 
   return backupDir;
@@ -316,9 +325,9 @@ export function runInit(options: InitOptions): void {
     }
 
     // Phase 2: Backup
-    console.log("\nCreating backup in .opencode.old/ ...");
+    console.log("\nCreating backup in .opencode/.dev-team_backups/ ...");
     const backupDir = backupConflictingFiles(conflictReport.files, targetDir);
-    console.log(`  Backup created at ${backupDir}`);
+    console.log(`  Backup created in .opencode/.dev-team_backups/`);
   }
 
   // ── Phase 3: Handle opencode config merge ──
@@ -362,7 +371,7 @@ export function runInit(options: InitOptions): void {
       writeFileSync(configDest, merged, "utf-8");
       console.log(`  Created ${configDest} (merged)`);
 
-      // Delete non-.jsonc config files (already backed up in .opencode.old/)
+      // Delete non-.jsonc config files (already backed up in .opencode/.dev-team_backups/)
       for (const ec of existingConfigs) {
         if (ec.path !== configDest) {
           unlinkSync(ec.path);
@@ -472,7 +481,7 @@ Commands:
 Options for init:
   --git       Initialize a git repository after deployment
   --ignore    Add team files to .gitignore (use with --git)
-  --force     Overwrite existing files (creates backup in .opencode.old/)
+  --force     Overwrite existing files (creates backup in .opencode/.dev-team_backups/)
 
 Examples:
   dev-team init

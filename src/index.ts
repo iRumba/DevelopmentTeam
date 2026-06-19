@@ -46,7 +46,7 @@ COMMANDS
 OPTIONS FOR init
   --git       Initialize a git repository after deployment
   --ignore    Add DevelopmentTeam files to .gitignore
-  --force     Overwrite existing files (creates backup in .opencode.old/)
+  --force     Overwrite existing files (creates backup in .opencode/.dev-team_backups/)
 
 EXAMPLES
   dev-team init
