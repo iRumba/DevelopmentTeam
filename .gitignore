@@ -7,3 +7,23 @@ tmp/
 .env.local
 .DS_Store
 Thumbs.db
+
+# Local Infrastructure
+.vs/
+.vscode/
+.idea/
+*.sln.iml
+*.sw?
+*~
+.project
+.classpath
+.settings/
+*.sublime-workspace
+*.sublime-project
+.ropeproject/
+.opencode/
+.ragignore
+AGENTS.md
+opencode-rag.json
+opencode.json
+opencode.jsonc
