@@ -3,11 +3,51 @@
   "instructions": [
     "./.opencode/tools/philosophy.md"
   ],
+  "provider": {
+    "openrouter": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "OpenRouter",
+      "options": {
+        "baseURL": "https://openrouter.ai/api/v1"
+      },
+      "models": {
+        "qwen3-vl-8b": {
+          "name": "qwen/qwen3-vl-8b-instruct",
+          "vision": true
+        }
+      }
+    }
+  },
   "permission": {
     "task": "deny",
     "webfetch": "deny"
   },
   "agent": {
+    "visual-reviewer": {
+      "model": "openrouter/qwen3-vl-8b",
+      "temperature": 0.2,
+      "permission": {
+        "read": "allow",
+        "glob": "allow",
+        "grep": "allow",
+        "bash": {
+          "*": "deny",
+          "npx playwright*": "allow",
+          "playwright*": "allow",
+          "node *_screenshot*": "allow",
+          "ls *": "allow",
+          "cat *": "allow",
+          "head *": "allow",
+          "file *": "allow"
+        },
+        "webfetch": "allow",
+        "websearch": "allow",
+        "task": {
+          "explorer": "allow",
+          "general": "allow"
+        }
+      }
+    },
     "researcher": {
       "permission": {
         "webfetch": "allow",
@@ -167,6 +207,11 @@
     }
   },
   "mcp": {
+    "playwright": {
+      "type": "local",
+      "command": ["npx", "-y", "@playwright/mcp"],
+      "enabled": true
+    },
     "jsonc": {
       "type": "local",
       "command": ["node", "./.opencode/plugins/jsonc-mcp-server.cjs"],

@@ -11,6 +11,7 @@ This project uses an opencode AI agent team for development. The team is orchest
 | `coder` | subagent | Writes and modifies code |
 | `scribe` | subagent | Creates documentation and prose |
 | `reviewer` | subagent | Reviews code for quality |
+| `visual-reviewer` | subagent | Visual review of UI screenshots, live pages, and design mockups |
 | `researcher` | subagent | External research (APIs, docs, libraries) |
 | `explorer` | subagent | Codebase analysis and exploration |
 | `secrets-manager` | subagent | Manages API keys and secrets |
@@ -28,6 +29,7 @@ Before writing any code, agents MUST load the relevant philosophy skill:
 - Code changes → delegate to `coder`
 - Documentation → delegate to `scribe`
 - Code review → delegate to `reviewer`
+- Visual review (screenshots, UI, live pages) → delegate to `visual-reviewer`
 
 ## Built-In Plugins
 
