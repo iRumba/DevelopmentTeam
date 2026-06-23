@@ -24,7 +24,7 @@
   },
   "agent": {
     "visual-reviewer": {
-      "model": "openrouter/qwen3-vl-8b",
+      "model": "openrouter/qwen/qwen3-vl-8b-instruct",
       "temperature": 0.2,
       "permission": {
         "read": "allow",
@@ -216,6 +216,14 @@
       "type": "local",
       "command": ["node", "./.opencode/plugins/jsonc-mcp-server.cjs"],
       "enabled": true
+    },
+    "image": {
+      "type": "local",
+      "command": [
+        "node",
+        "./.opencode/plugins/image-mcp-server.cjs"
+      ],
+      "enabled": true
     }
   },
   "plugin": [
@@ -224,6 +232,7 @@
     "./.opencode/plugins/workspace-plugin.ts",
     "./.opencode/plugins/background-agents.ts",
     "./.opencode/plugins/notify.ts",
-    "./.opencode/plugins/worktree.ts"
+    "./.opencode/plugins/worktree.ts",
+    "./.opencode/plugins/image-plugin.ts"
   ]
 }
