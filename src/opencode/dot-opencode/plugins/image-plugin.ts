@@ -105,10 +105,12 @@ function extractImageUrl(part: Record<string, unknown>): string | null {
 		if (imageUrl?.url) return imageUrl.url
 	}
 
-	// Fallback: { type: "image", url: string }
+	// Fallback: { type: "image", url: string } or { type: "image", image_url: { url: string } }
 	if (partType === "image") {
 		const url = part.url as string | undefined
 		if (url) return url
+		const imageUrl = part.image_url as { url?: string } | undefined
+		if (imageUrl?.url) return imageUrl.url
 	}
 
 	// Fallback: direct mimeType check for raw data (M2: runtime type guard)
@@ -118,6 +120,10 @@ function extractImageUrl(part: Record<string, unknown>): string | null {
 		const url = part.url as string | undefined
 		if (url) return url
 	}
+
+	// Catch-all: any part with image_url.url (regardless of type)
+	const imageUrl = part.image_url as { url?: string } | undefined
+	if (imageUrl?.url) return imageUrl.url
 
 	return null
 }
