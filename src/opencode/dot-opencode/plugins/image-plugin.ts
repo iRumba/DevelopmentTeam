@@ -111,9 +111,8 @@ function extractImageUrl(part: Record<string, unknown>): string | null {
 		if (url) return url
 	}
 
-	// Fallback: direct mimeType check for raw data
-	const mimeType = part.mimeType as string | undefined
-	if (mimeType?.startsWith("image/")) {
+	// Fallback: direct mimeType check for raw data (M2: runtime type guard)
+	if (typeof part.mimeType === "string" && part.mimeType.startsWith("image/")) {
 		const imageUrl = part.image_url as { url?: string } | undefined
 		if (imageUrl?.url) return imageUrl.url
 		const url = part.url as string | undefined
@@ -167,9 +166,15 @@ async function indexImage(
 			return resultData.image_id
 		}
 
-		// MCP tools often return content array
+		// MCP tools often return content array (Law 2: Parse at boundary)
 		const content = resultData.content as Array<{ text?: string }> | undefined
 		if (content?.[0]?.text) {
+			try {
+				const parsed = JSON.parse(content[0].text.trim())
+				if (typeof parsed.id === "string") return parsed.id
+			} catch {
+				// If it's not JSON, fall through to return raw text
+			}
 			return content[0].text.trim()
 		}
 
@@ -248,15 +253,16 @@ const ImagePlugin: Plugin = async (ctx) => {
 		if (!properties || typeof properties !== "object") return
 
 		const info = properties.info as Record<string, unknown> | undefined
-		const parts = properties.parts as Array<Record<string, unknown>> | undefined
 
-		// Guard: info and parts required (Law 1: Early Exit)
-		if (!info || !parts || !Array.isArray(parts)) return
+		// Try multiple locations for sessionID (resilient across event shapes)
+		const sessionID = (info?.sessionID as string | undefined) ?? (properties.sessionID as string | undefined)
 
-		const sessionID = info.sessionID as string | undefined
+		// Try multiple locations for parts (resilient across event shapes)
+		const parts = (properties.parts as Array<Record<string, unknown>> | undefined) ??
+			((info?.parts as Array<Record<string, unknown>> | undefined) ?? undefined)
 
-		// Guard: sessionID required (Law 1: Early Exit)
-		if (!sessionID) return
+		// Guard: sessionID and parts required (Law 1: Early Exit)
+		if (!sessionID || !parts || !Array.isArray(parts)) return
 
 		// Find image URL parts
 		const imageUrls: string[] = []
@@ -273,14 +279,11 @@ const ImagePlugin: Plugin = async (ctx) => {
 		// Resolve root session ID for scoping
 		const rootSessionID = await getRootSessionID(client, sessionID)
 
-		// Index each image via MCP
-		const newImageIds: string[] = []
-		for (const imageUrl of imageUrls) {
-			const imageID = await indexImage(client, imageUrl, rootSessionID, sessionID)
-			if (imageID) {
-				newImageIds.push(imageID)
-			}
-		}
+		// Index each image via MCP (m1: parallelize to reduce race condition window)
+		const results = await Promise.all(
+			imageUrls.map((url) => indexImage(client, url, rootSessionID, sessionID)),
+		)
+		const newImageIds = results.filter((id): id is string => id !== null)
 
 		// Guard: no images successfully indexed (Law 1: Early Exit)
 		if (newImageIds.length === 0) return
@@ -317,6 +320,10 @@ const ImagePlugin: Plugin = async (ctx) => {
 
 		// Resolve root session ID
 		const rootSessionID = await getRootSessionID(client, sessionID)
+
+		// M1: Only clear images if the idle session IS the root session.
+		// Child sessions become idle independently while the parent is still active.
+		if (sessionID !== rootSessionID) return
 
 		// Clear images from MCP server (non-fatal if unavailable)
 		await clearSessionImages(client, rootSessionID)
