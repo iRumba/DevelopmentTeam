@@ -2,20 +2,30 @@
  * image-plugin
  * Image indexing and injection for OpenCode
  *
- * Intercepts messages with images, indexes them via the image MCP server,
+ * Intercepts messages with images, indexes them directly to the filesystem,
  * and injects image IDs into chat prompts so agents can reference them.
  *
  * Architecture:
  * - Listens for message.updated events to detect user-attached images
- * - Indexes images via image_add MCP tool, keyed by root session ID
+ * - Indexes images by writing them to ~/.local/share/opencode/images/<projectId>/<rootSessionId>/
  * - Injects image IDs into chat.message output for agent awareness
- * - Cleans up on session.idle via image_clear_session MCP tool
+ * - Cleans up on session.idle by removing the session's image directory
+ *
+ * The MCP server (image-mcp-server.cjs) handles reading for agents (visual-reviewer).
  *
  * Philosophy: Elegant Defense (Guard Clauses, Fail Fast, Intentional Naming)
  */
 
+import * as fs from "node:fs/promises"
+import * as path from "node:path"
+import * as crypto from "node:crypto"
+import * as os from "node:os"
+import * as https from "node:https"
+import * as http from "node:http"
+
 import type { Plugin } from "@opencode-ai/plugin"
 import type { OpencodeClient } from "./kdco-primitives/types"
+import { getProjectId } from "./kdco-primitives/get-project-id"
 
 // ==========================================
 // IN-MEMORY STATE
@@ -129,115 +139,165 @@ function extractImageUrl(part: Record<string, unknown>): string | null {
 }
 
 // ==========================================
-// MCP TOOL CALLING
+// FILESYSTEM STORAGE HELPERS
 // ==========================================
 
 /**
- * Typed wrapper around MCP tool calls. Eliminates the need for `as any` casts.
+ * Compute the storage base directory for images.
  */
-async function callMCPTool<T = unknown>(
-	client: OpencodeClient,
-	name: string,
-	args: Record<string, unknown>,
-): Promise<{ content: Array<{ type: string; text: string }> }> {
-	return (client as any).tools.call({ name, arguments: args }) as any
+function getStorageBase(projectId: string): string {
+	return path.join(os.homedir(), ".local", "share", "opencode", "images", projectId)
 }
 
 /**
- * Indexes an image via the image MCP server.
- * Logs a warning if the MCP server is unavailable (non-fatal).
+ * Download an image from a URL with 10s timeout.
+ */
+function downloadUrl(url: string): Promise<{ buffer: Buffer; mimeType: string }> {
+	return new Promise((resolve, reject) => {
+		const protocol = url.startsWith("https") ? https : http
+		const req = protocol.get(url, { timeout: 10000 }, (res) => {
+			if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+				// Follow redirect
+				return resolve(downloadUrl(res.headers.location))
+			}
+			if (!res.statusCode || res.statusCode >= 400) {
+				return reject(new Error(`HTTP ${res.statusCode}: ${url}`))
+			}
+			const chunks: Buffer[] = []
+			res.on("data", (chunk: Buffer) => chunks.push(chunk))
+			res.on("end", () => {
+				const buffer = Buffer.concat(chunks)
+				const contentType = res.headers["content-type"] || "image/png"
+				resolve({ buffer, mimeType: contentType })
+			})
+		})
+		req.on("error", reject)
+		req.on("timeout", () => { req.destroy(); reject(new Error(`Timeout: ${url}`)) })
+	})
+}
+
+/**
+ * Map MIME type to file extension.
+ */
+function getExtension(mimeType: string): string {
+	const map: Record<string, string> = {
+		"image/png": "png",
+		"image/jpeg": "jpg",
+		"image/jpg": "jpg",
+		"image/gif": "gif",
+		"image/webp": "webp",
+		"image/svg+xml": "svg",
+		"image/bmp": "bmp",
+	}
+	return map[mimeType] || "bin"
+}
+
+// ==========================================
+// IMAGE INDEXING (FILESYSTEM)
+// ==========================================
+
+/**
+ * Indexes an image by writing it to the filesystem.
+ * Uses SHA-256 content addressing for idempotent storage.
+ * Logs a warning if indexing fails (non-fatal).
  *
- * @param client - OpenCode client for tool calling
+ * The image is stored at:
+ *   ~/.local/share/opencode/images/<projectId>/<rootSessionId>/
+ *     img_<sha256_prefix>.<ext>
+ *     img_<sha256_prefix>.json   (metadata)
+ *
+ * @param client - OpenCode client for logging
  * @param imageUrl - The image URL or data URI to index
  * @param rootSessionID - The root session ID for scoping
- * @param sessionID - The current session ID (agent session)
+ * @param _sessionID - The current session ID (unused in filesystem version, kept for signature compat)
+ * @param storageBase - The base storage directory for images
  * @returns The image ID if indexed, null otherwise
  */
 async function indexImage(
 	client: OpencodeClient,
 	imageUrl: string,
 	rootSessionID: string,
-	sessionID: string,
+	_sessionID: string,
+	storageBase: string,
 ): Promise<string | null> {
 	try {
-		const result = await callMCPTool(client, "image_add", {
-			source: imageUrl,
-			session_id: rootSessionID,
-			description: "Image attached by user",
-		})
+		let buffer: Buffer
+		let mimeType: string
 
-		// Parse result: could be { image_id: string } or { content: [{ text: string }] }
-		const resultData = result as Record<string, unknown>
-		if (typeof resultData.image_id === "string") {
-			return resultData.image_id
+		if (imageUrl.startsWith("data:")) {
+			// Data URI: extract base64 and mime type
+			const match = imageUrl.match(/^data:(image\/[^;]+);base64,(.+)$/)
+			if (!match) return null
+			mimeType = match[1]
+			buffer = Buffer.from(match[2], "base64")
+			if (buffer.length === 0) return null
+		} else if (imageUrl.startsWith("http://") || imageUrl.startsWith("https://")) {
+			// Remote URL: download
+			const result = await downloadUrl(imageUrl)
+			buffer = result.buffer
+			mimeType = result.mimeType
+		} else {
+			return null // Unsupported source type
 		}
 
-		// MCP tools often return content array (Law 2: Parse at boundary)
-		const content = resultData.content as Array<{ text?: string }> | undefined
-		if (content?.[0]?.text) {
-			try {
-				const parsed = JSON.parse(content[0].text.trim())
-				if (typeof parsed.id === "string") return parsed.id
-			} catch {
-				// If it's not JSON, fall through to return raw text
-			}
-			return content[0].text.trim()
+		// Compute SHA-256 hash for content-addressed ID
+		const hash = crypto.createHash("sha256").update(buffer).digest("hex")
+		const shortHash = hash.slice(0, 8)
+		const ext = getExtension(mimeType)
+
+		// Storage: ~/.local/share/opencode/images/<projectId>/<rootSessionId>/
+		const sessionDir = path.join(storageBase, rootSessionID)
+		await fs.mkdir(sessionDir, { recursive: true })
+
+		const imageId = `img_${shortHash}`
+		const imagePath = path.join(sessionDir, `${imageId}.${ext}`)
+		const metaPath = path.join(sessionDir, `${imageId}.json`)
+
+		// Check if already exists (idempotent)
+		try {
+			await fs.access(imagePath)
+			// Already exists, return same ID
+			return imageId
+		} catch {
+			// Doesn't exist, create
 		}
 
-		// If we got a result but can't parse it, log and continue
-		client.app
-			.log({
-				body: {
-					service: "image-plugin",
-					level: "warn",
-					message: `indexImage: unexpected result shape for image at ${imageUrl.slice(0, 50)}...`,
-				},
-			})
-			.catch(() => {})
+		// Save image file
+		await fs.writeFile(imagePath, buffer)
 
-		return null
+		// Save metadata
+		await fs.writeFile(metaPath, JSON.stringify({
+			source: imageUrl.slice(0, 100),
+			mimeType,
+			timestamp: new Date().toISOString(),
+		}, null, 2))
+
+		return imageId
 	} catch (error) {
-		// Fail-safe: MCP server may not be running, log and continue
-		client.app
-			.log({
-				body: {
-					service: "image-plugin",
-					level: "warn",
-					message: `indexImage: failed to index image (MCP server may not be running): ${error instanceof Error ? error.message : String(error)}`,
-				},
-			})
-			.catch(() => {})
-
+		client.app.log({
+			body: {
+				service: "image-plugin",
+				level: "warn",
+				message: `indexImage: failed to index image: ${error instanceof Error ? error.message : String(error)}`,
+			},
+		}).catch(() => {})
 		return null
 	}
 }
 
 /**
- * Clears all indexed images for a session via the image MCP server.
- * Non-fatal: logs a warning if the MCP server is unavailable.
+ * Clears all indexed images for a session by removing the session directory.
+ * Non-fatal: logs a warning if the directory cannot be removed.
  *
- * @param client - OpenCode client for tool calling
+ * @param storageBase - The base storage directory for images
  * @param rootSessionID - The root session ID to clear images for
  */
-async function clearSessionImages(
-	client: OpencodeClient,
-	rootSessionID: string,
-): Promise<void> {
+async function clearSessionImages(storageBase: string, rootSessionID: string): Promise<void> {
+	const sessionDir = path.join(storageBase, rootSessionID)
 	try {
-		await callMCPTool(client, "image_clear_session", {
-			session_id: rootSessionID,
-		})
-	} catch (error) {
-		// Fail-safe: MCP server may not be running, log and continue
-		client.app
-			.log({
-				body: {
-					service: "image-plugin",
-					level: "warn",
-					message: `clearSessionImages: failed to clear images (MCP server may not be running): ${error instanceof Error ? error.message : String(error)}`,
-				},
-			})
-			.catch(() => {})
+		await fs.rm(sessionDir, { recursive: true, force: true })
+	} catch {
+		// Directory may not exist
 	}
 }
 
@@ -247,6 +307,10 @@ async function clearSessionImages(
 
 const ImagePlugin: Plugin = async (ctx) => {
 	const { client, directory } = ctx
+
+	// Compute project ID and storage base
+	const projectId = await getProjectId(directory)
+	const storageBase = getStorageBase(projectId)
 
 	/**
 	 * Handle message.updated events: detect images and index them.
@@ -283,11 +347,11 @@ const ImagePlugin: Plugin = async (ctx) => {
 		if (imageUrls.length === 0) return
 
 		// Resolve root session ID for scoping
-		const rootSessionID = await getRootSessionID(client, sessionID)
+		const rootSessionID = await getRootSessionID(client as unknown as OpencodeClient, sessionID)
 
-		// Index each image via MCP (m1: parallelize to reduce race condition window)
+		// Index each image to filesystem (m1: parallelize to reduce race condition window)
 		const results = await Promise.all(
-			imageUrls.map((url) => indexImage(client, url, rootSessionID, sessionID)),
+			imageUrls.map((url) => indexImage(client as unknown as OpencodeClient, url, rootSessionID, sessionID, storageBase)),
 		)
 		const newImageIds = results.filter((id): id is string => id !== null)
 
@@ -325,14 +389,14 @@ const ImagePlugin: Plugin = async (ctx) => {
 		if (!sessionID) return
 
 		// Resolve root session ID
-		const rootSessionID = await getRootSessionID(client, sessionID)
+		const rootSessionID = await getRootSessionID(client as unknown as OpencodeClient, sessionID)
 
 		// M1: Only clear images if the idle session IS the root session.
 		// Child sessions become idle independently while the parent is still active.
 		if (sessionID !== rootSessionID) return
 
-		// Clear images from MCP server (non-fatal if unavailable)
-		await clearSessionImages(client, rootSessionID)
+		// Clear images from filesystem (non-fatal if unavailable)
+		await clearSessionImages(storageBase, rootSessionID)
 
 		// Clean up in-memory maps
 		imageMap.delete(rootSessionID)
@@ -391,7 +455,7 @@ const ImagePlugin: Plugin = async (ctx) => {
 			if (!input.sessionID) return
 
 			// Resolve root session ID (use cache if available)
-			const rootID = rootSessionCache.get(input.sessionID) ?? (await getRootSessionID(client, input.sessionID))
+			const rootID = rootSessionCache.get(input.sessionID) ?? (await getRootSessionID(client as unknown as OpencodeClient, input.sessionID))
 
 			const imageIds = imageMap.get(rootID)
 
