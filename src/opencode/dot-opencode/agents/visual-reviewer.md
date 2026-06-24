@@ -55,7 +55,7 @@ Use these tools when the build provides a live URL rather than screenshots.
 
 You have access to plugin-native tools for image retrieval:
 
-- `image_get(id: string)` — Retrieve an image by ID. Scans all sessions to find the image automatically. Returns `{ mimeType, data: base64 }`.
+- `image_get(id: string)` — Retrieve an image by ID. Scans all sessions to find the image automatically. Returns a data URI string like `data:image/png;base64,...`.
 - `image_list()` — List all available image IDs with metadata.
 - `image_get_url(url: string)` — Fetch an image directly from a URL or data URI (returns base64, no indexing).
 - `image_clear_session()` — Clear all images for the current session (idempotent).
@@ -73,7 +73,7 @@ You have access to plugin-native tools for image retrieval:
 - Orchestrator notification: `[System: User has attached 1 image(s). Image ID(s): img_abc12345. To retrieve, use the \`image_get\` tool with the image ID.]`
 - visual-reviewer call: `image_get(id="img_abc12345")`
 
-This returns `{ mimeType, data: base64 }` — pass the base64 data to your vision model for analysis.
+This returns a data URI string `data:image/png;base64,...` — the vision model can render it directly.
 
 ## FORBIDDEN ACTIONS
 

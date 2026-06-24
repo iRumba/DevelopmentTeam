@@ -649,7 +649,7 @@ const ImagePlugin: Plugin = async (ctx) => {
 
 		tool: {
 			image_get: tool({
-				description: "Get an image by ID. Scans all sessions to find the image automatically. Returns { mimeType, data: base64 }.",
+				description: "Get an image by ID. Scans all sessions to find the image automatically. Returns a data URI string like `data:image/png;base64,...`.",
 				args: {
 					id: tool.schema.string().describe("Image ID (e.g. img_abc12345)"),
 				},
@@ -703,7 +703,7 @@ const ImagePlugin: Plugin = async (ctx) => {
 							const dataBuffer = await fs.readFile(dataPath)
 							const data = dataBuffer.toString("base64")
 
-							return JSON.stringify({ mimeType, data })
+							return `data:${mimeType};base64,${data}`
 						}
 
 						return `❌ Image not found: ${id}`
