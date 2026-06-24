@@ -5,6 +5,7 @@ const https = require("node:https");
 const crypto = require("node:crypto");
 const os = require("node:os");
 const { stdin, stdout } = require("node:process");
+const { execSync } = require("node:child_process");
 
 const WORKSPACE_ROOT = process.cwd();
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
@@ -15,19 +16,18 @@ const STORAGE_BASE = process.env.IMAGE_STORAGE_BASE ||
   path.join(os.homedir(), ".local", "share", "opencode", "images");
 
 // Compute project ID from git root commit hash for cross-worktree consistency
+// Uses root commit (same as kdco-primitives/get-project-id.ts) so that all
+// worktrees of the same repo share the same project ID.
 let PROJECT_ID = "default";
 try {
-  const gitHeadPath = path.join(WORKSPACE_ROOT, ".git", "HEAD");
-  if (fs.existsSync(gitHeadPath)) {
-    const headContent = fs.readFileSync(gitHeadPath, "utf-8").trim();
-    if (headContent.startsWith("ref: ")) {
-      const refPath = path.join(WORKSPACE_ROOT, ".git", headContent.slice(5));
-      if (fs.existsSync(refPath)) {
-        PROJECT_ID = fs.readFileSync(refPath, "utf-8").trim();
-      }
-    } else {
-      PROJECT_ID = headContent;
-    }
+  const result = execSync("git rev-list --max-parents=0 --all", {
+    cwd: WORKSPACE_ROOT,
+    encoding: "utf-8",
+    timeout: 5000,
+  });
+  const roots = result.trim().split("\n").filter(Boolean).map(x => x.trim()).sort();
+  if (roots.length > 0 && /^[a-f0-9]{40}$/i.test(roots[0])) {
+    PROJECT_ID = roots[0];
   }
 } catch (err) {
   process.stderr.write(`[image-mcp-server] Warning: could not determine git project ID, using default: ${err.message}\n`);
@@ -318,11 +318,16 @@ function handleImageList(args) {
   if (sessionId) {
     sessionDirs = [validateSessionId(sessionId)];
   } else {
-    const basePath = path.join(STORAGE_BASE, PROJECT_ID);
-    if (fs.existsSync(basePath)) {
-      const entries = fs.readdirSync(basePath, { withFileTypes: true });
-      sessionDirs = entries.filter(e => e.isDirectory()).map(e => e.name);
+    let entries = [];
+    try {
+      entries = fs.readdirSync(path.join(STORAGE_BASE, PROJECT_ID), { withFileTypes: true });
+    } catch (e) {
+      if (e.code === "ENOENT") {
+        return { images: [] };
+      }
+      throw e;
     }
+    sessionDirs = entries.filter(e => e.isDirectory()).map(e => e.name);
   }
 
   for (const dir of sessionDirs) {
@@ -369,12 +374,19 @@ function handleImageGet(args) {
     }
   } else {
     // No session_id — look for .session mapping file in all session dirs
-    const basePath = path.join(STORAGE_BASE, PROJECT_ID);
-    const entries = fs.readdirSync(basePath, { withFileTypes: true });
+    let entries = [];
+    try {
+      entries = fs.readdirSync(path.join(STORAGE_BASE, PROJECT_ID), { withFileTypes: true });
+    } catch (e) {
+      if (e.code === "ENOENT") {
+        throw new Error(`Image not found: ${safeId}`);
+      }
+      throw e;
+    }
     let found = false;
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      const sessionFilePath = path.join(basePath, entry.name, safeId + ".session");
+      const sessionFilePath = path.join(STORAGE_BASE, PROJECT_ID, entry.name, safeId + ".session");
       if (fs.existsSync(sessionFilePath)) {
         // Read the mapped session ID from the file
         const mappedSessionId = fs.readFileSync(sessionFilePath, "utf8").trim();
