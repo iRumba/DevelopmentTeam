@@ -511,10 +511,88 @@ const ImagePlugin: Plugin = async (ctx) => {
 			input: { sessionID?: string },
 			output: { parts?: Array<{ type: string; text?: string }> },
 		): Promise<void> => {
-			// Guard: sessionID required (Law 1: Early Exit)
-			if (!input.sessionID) return
+			// Guard: sessionID and output parts required (Law 1: Early Exit)
+			if (!input.sessionID || !output.parts || output.parts.length === 0) return
 
-			// Debug: log chat.message hook
+			// ──────────────────────────────────────────────────────
+			// PRIMARY PATH: Scan output.parts directly for image data.
+			// This avoids the race condition where message.part.updated
+			// fires after chat.message, leaving imageMap empty.
+			// ──────────────────────────────────────────────────────
+
+			// Collect image parts and their indices for later removal
+			const imagePartIndices: number[] = []
+			const imageUrls: string[] = []
+
+			for (let i = 0; i < output.parts.length; i++) {
+				const imageUrl = extractImageUrl(output.parts[i] as Record<string, unknown>)
+				if (imageUrl) {
+					imagePartIndices.push(i)
+					imageUrls.push(imageUrl)
+				}
+			}
+
+			if (imageUrls.length > 0) {
+				// Resolve root session ID for scoping
+				let rootID = rootSessionCache.get(input.sessionID)
+				if (!rootID) {
+					try {
+						rootID = await getRootSessionID(client as unknown as OpencodeClient, input.sessionID)
+					} catch (err) {
+						debugLog(client as unknown as OpencodeClient, `chat.message: failed to resolve root session: ${err}`)
+						return
+					}
+				}
+
+				// Index each image and collect unique IDs
+				const indexedIds: string[] = []
+
+				const results = await Promise.all(
+					imageUrls.map((url) =>
+						indexImage(client as unknown as OpencodeClient, url, rootID, input.sessionID, storageBase)
+					)
+				)
+				for (const imageId of results) {
+					if (imageId && !indexedIds.includes(imageId)) {
+						indexedIds.push(imageId)
+					}
+				}
+
+				if (imageUrls.length > 0 && indexedIds.length === 0) {
+					await debugLog(client as unknown as OpencodeClient,
+						`chat.message: found ${imageUrls.length} image(s) in parts but none indexed successfully`)
+				}
+
+				if (indexedIds.length > 0) {
+					// Store in imageMap for cleanup tracking
+					const existingIds = imageMap.get(rootID) ?? []
+					for (const id of indexedIds) {
+						if (!existingIds.includes(id)) {
+							existingIds.push(id)
+						}
+					}
+					imageMap.set(rootID, existingIds)
+
+					// Remove raw image parts from output (reverse order preserves indices)
+					for (const idx of [...imagePartIndices].reverse()) {
+						output.parts.splice(idx, 1)
+					}
+
+					// Inject system notification
+					const notification = `[System: User has attached ${indexedIds.length} image(s). Image ID(s): ${indexedIds.join(", ")}. To analyze these images, delegate to visual-reviewer and pass the image ID(s). visual-reviewer can retrieve images via the \`image_get\` MCP tool.]`
+					output.parts.unshift({ type: "text", text: notification })
+
+					return
+				}
+
+				// If all images failed to index, fall through to the imageMap fallback below
+			}
+
+			// ──────────────────────────────────────────────────────
+			// FALLBACK PATH: Check imageMap for images indexed
+			// asynchronously via the message.part.updated handler.
+			// ──────────────────────────────────────────────────────
+
 			let rootID = rootSessionCache.get(input.sessionID)
 			if (!rootID) {
 				try {
@@ -532,7 +610,7 @@ const ImagePlugin: Plugin = async (ctx) => {
 				imageMapSize: imageMap.size,
 				imageIds: imageIds || "(empty)",
 				willInject: !!(imageIds && imageIds.length > 0),
-			}).catch(() => {})
+			})
 
 			// Guard: no images tracked for this session (Law 1: Early Exit)
 			if (!imageIds || imageIds.length === 0) return
