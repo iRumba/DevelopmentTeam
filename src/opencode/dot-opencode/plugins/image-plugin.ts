@@ -6,7 +6,8 @@
  * and injects image IDs into chat prompts so agents can reference them.
  *
  * Architecture:
- * - Listens for message.updated events to detect user-attached images
+ * - Listens for message.part.updated events (primary) to detect user-attached images as FileParts
+ * - Falls back to message.updated events for legacy event shapes  
  * - Indexes images by writing them to ~/.local/share/opencode/images/<projectId>/<rootSessionId>/
  * - Injects image IDs into chat.message output for agent awareness
  * - Cleans up on session.idle by removing the session's image directory
@@ -36,7 +37,7 @@ async function debugLog(client: OpencodeClient, message: string, data?: unknown)
 	client.app.log({
 		body: {
 			service: "image-plugin",
-			level: "debug",
+			level: "info",
 			message: data ? `${message} ${JSON.stringify(data)}` : message,
 		},
 	}).catch(() => {})
@@ -133,8 +134,18 @@ async function getRootSessionID(
  * @returns The image URL if found, null otherwise
  */
 function extractImageUrl(part: Record<string, unknown>): string | null {
-	// Standard: { type: "image_url", image_url: { url: string } }
 	const partType = part.type
+
+	// FilePart: { type: "file", mime: "image/...", url: "..." }
+	if (partType === "file") {
+		const mime = part.mime as string | undefined
+		if (typeof mime === "string" && mime.startsWith("image/")) {
+			const url = part.url as string | undefined
+			if (url) return url
+		}
+	}
+
+	// Standard: { type: "image_url", image_url: { url: string } }
 	if (partType === "image_url") {
 		const imageUrl = part.image_url as { url?: string } | undefined
 		if (imageUrl?.url) return imageUrl.url
@@ -338,18 +349,12 @@ const ImagePlugin: Plugin = async (ctx) => {
 	const storageBase = getStorageBase(projectId)
 
 	/**
-	 * Handle message.updated events: detect images and index them.
-	 * This is a tracking-only function — it does not modify the message.
+	 * Handle message.updated events: monitor session activity.
+	 * This is a tracking-only function — image detection is done in handleMessagePartUpdated.
+	 * Kept as a fallback in case other event shapes carry parts in the future.
 	 */
 	async function handleMessageUpdated(event: Record<string, unknown>): Promise<void> {
 		const properties = event.properties as Record<string, unknown> | undefined
-
-		// Debug: log incoming event structure
-		await debugLog(client as unknown as OpencodeClient, `handleMessageUpdated called`, {
-			hasProperties: !!properties,
-			propertiesType: typeof properties,
-			infoExists: !!(properties?.info),
-		})
 
 		// Guard: properties required (Law 1: Early Exit)
 		if (!properties || typeof properties !== "object") {
@@ -359,86 +364,64 @@ const ImagePlugin: Plugin = async (ctx) => {
 
 		const info = properties.info as Record<string, unknown> | undefined
 
-		// Try multiple locations for sessionID (resilient across event shapes)
-		const sessionID = (info?.sessionID as string | undefined) ?? (properties.sessionID as string | undefined)
+		// Extract sessionID from info (EventMessageUpdated shape: properties.info.sessionID)
+		const sessionID = info?.sessionID as string | undefined
 
-		// Try multiple locations for parts (resilient across event shapes)
-		const parts = (properties.parts as Array<Record<string, unknown>> | undefined) ??
-			((info?.parts as Array<Record<string, unknown>> | undefined) ?? undefined)
-
-		// Debug: log extracted values
-		await debugLog(client as unknown as OpencodeClient, `handleMessageUpdated: extracted`, {
-			infoExists: !!info,
-			sessionID: sessionID || "(not found)",
-			partsLength: parts?.length ?? "(not found)",
-			partsIsArray: Array.isArray(parts),
-		})
-
-		// Guard: sessionID and parts required (Law 1: Early Exit)
-		if (!sessionID || !parts || !Array.isArray(parts)) {
-			await debugLog(client as unknown as OpencodeClient, `handleMessageUpdated: early exit - missing sessionID or parts`, {
-				sessionID: !!sessionID,
-				hasParts: !!parts,
-				isArray: Array.isArray(parts),
-			})
+		// Guard: sessionID required (Law 1: Early Exit)
+		if (!sessionID) {
+			await debugLog(client as unknown as OpencodeClient, `handleMessageUpdated: early exit - no sessionID`)
 			return
 		}
 
-		// Find image URL parts
-		const imageUrls: string[] = []
-		for (const part of parts) {
-			const imageUrl = extractImageUrl(part)
-			// Debug: log part inspection result
-			debugLog(client as unknown as OpencodeClient, `Part inspection`, {
-				type: part.type,
-				hasMimeType: typeof part.mimeType === "string",
-				mimeTypeStart: typeof part.mimeType === "string" ? part.mimeType.slice(0, 10) : "",
-				hasImageUrl: !!part.image_url,
-				imageUrlKeys: part.image_url ? Object.keys(part.image_url as object).join(",") : "",
-				hasUrl: !!part.url,
-				foundUrl: imageUrl ? imageUrl.slice(0, 30) + "..." : null,
-			}).catch(() => {})
-			if (imageUrl) {
-				imageUrls.push(imageUrl)
-			}
+		// Monitor: log that a message was updated for this session
+		await debugLog(client as unknown as OpencodeClient, `handleMessageUpdated: session ${sessionID}`)
+	}
+
+	/**
+	 * Handle message.part.updated events: detect images in new parts and index them.
+	 * This is the primary image detection path — the SDK fires this when image parts are created.
+	 */
+	async function handleMessagePartUpdated(properties: Record<string, unknown>): Promise<void> {
+		// Extract part from properties
+		const part = properties?.part as Record<string, unknown> | undefined
+
+		// Guard: part required (Law 1: Early Exit)
+		if (!part || typeof part !== "object") {
+			await debugLog(client as unknown as OpencodeClient, `handleMessagePartUpdated: early exit - no part`)
+			return
 		}
 
-		// Guard: no images found (Law 1: Early Exit)
-		if (imageUrls.length === 0) return
+		// Extract session ID from part (FilePart carries sessionID directly)
+		const sessionID = part.sessionID as string | undefined
+
+		// Guard: sessionID required (Law 1: Early Exit)
+		if (!sessionID) {
+			await debugLog(client as unknown as OpencodeClient, `handleMessagePartUpdated: early exit - no sessionID`)
+			return
+		}
+
+		// Extract image URL from the part (handles FilePart, image_url, etc.)
+		const imageUrl = extractImageUrl(part as Record<string, unknown>)
+
+		// Guard: no image URL found (Law 1: Early Exit)
+		if (!imageUrl) return
 
 		// Resolve root session ID for scoping
 		const rootSessionID = await getRootSessionID(client as unknown as OpencodeClient, sessionID)
 
-		// Index each image to filesystem (m1: parallelize to reduce race condition window)
-		const results = await Promise.all(
-			imageUrls.map((url) => indexImage(client as unknown as OpencodeClient, url, rootSessionID, sessionID, storageBase)),
-		)
-		const newImageIds = results.filter((id): id is string => id !== null)
+		// Index the image to filesystem
+		const imageId = await indexImage(client as unknown as OpencodeClient, imageUrl, rootSessionID, sessionID, storageBase)
 
-		// Debug: log indexing results
-		debugLog(client as unknown as OpencodeClient, `Indexing complete`, {
-			attempted: imageUrls.length,
-			succeeded: newImageIds.length,
-			ids: newImageIds,
-		}).catch(() => {})
+		// Guard: indexing failed (Law 1: Early Exit)
+		if (!imageId) return
 
-		// Guard: no images successfully indexed (Law 1: Early Exit)
-		if (newImageIds.length === 0) return
-
-		// Store in the in-memory map (append to existing entries)
+		// Store in the in-memory map (append to existing entries, deduplicate)
 		const existingIds = imageMap.get(rootSessionID) ?? []
-		imageMap.set(rootSessionID, [...existingIds, ...newImageIds])
+		if (!existingIds.includes(imageId)) {
+			imageMap.set(rootSessionID, [...existingIds, imageId])
+		}
 
-		// Log the indexing result
-		client.app
-			.log({
-				body: {
-					service: "image-plugin",
-					level: "info",
-					message: `Indexed ${newImageIds.length} image(s) for session ${rootSessionID}: ${newImageIds.join(", ")}`,
-				},
-			})
-			.catch(() => {})
+		await debugLog(client as unknown as OpencodeClient, `handleMessagePartUpdated: indexed image ${imageId} for session ${rootSessionID}`)
 	}
 
 	/**
@@ -504,6 +487,8 @@ const ImagePlugin: Plugin = async (ctx) => {
 
 			if (eventType === "message.updated") {
 				await handleMessageUpdated(event)
+			} else if (eventType === "message.part.updated") {
+				await handleMessagePartUpdated(event.properties as Record<string, unknown>)
 			} else if (eventType === "session.idle") {
 				await handleSessionIdle(event)
 			} else if (eventType === "session.status") {
@@ -530,7 +515,15 @@ const ImagePlugin: Plugin = async (ctx) => {
 			if (!input.sessionID) return
 
 			// Debug: log chat.message hook
-			const rootID = rootSessionCache.get(input.sessionID) ?? (await getRootSessionID(client as unknown as OpencodeClient, input.sessionID))
+			let rootID = rootSessionCache.get(input.sessionID)
+			if (!rootID) {
+				try {
+					rootID = await getRootSessionID(client as unknown as OpencodeClient, input.sessionID)
+				} catch (err) {
+					debugLog(client as unknown as OpencodeClient, `chat.message: failed to resolve root session: ${err}`)
+					return
+				}
+			}
 			const imageIds = imageMap.get(rootID)
 			debugLog(client as unknown as OpencodeClient, `chat.message hook`, {
 				sessionID: input.sessionID,
