@@ -523,12 +523,15 @@ const ImagePlugin: Plugin = async (ctx) => {
 			// Collect image parts and their indices for later removal
 			const imagePartIndices: number[] = []
 			const imageUrls: string[] = []
+			let firstImagePart: Record<string, unknown> | null = null
 
 			for (let i = 0; i < output.parts.length; i++) {
-				const imageUrl = extractImageUrl(output.parts[i] as Record<string, unknown>)
+				const part = output.parts[i] as Record<string, unknown>
+				const imageUrl = extractImageUrl(part)
 				if (imageUrl) {
 					imagePartIndices.push(i)
 					imageUrls.push(imageUrl)
+					if (!firstImagePart) firstImagePart = part
 				}
 			}
 
@@ -578,9 +581,23 @@ const ImagePlugin: Plugin = async (ctx) => {
 						output.parts.splice(idx, 1)
 					}
 
-					// Inject system notification
+					// Generate proper TextPart with required fields (id, sessionID, messageID)
+					// Using first image part as reference for sessionID and messageID
+					const refPart = firstImagePart ?? {}
+					const partId = `part_img_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
+					const partSessionID = (refPart.sessionID as string) || input.sessionID || ""
+					const partMessageID = (refPart.messageID as string) || ""
+
 					const notification = `[System: User has attached ${indexedIds.length} image(s). Image ID(s): ${indexedIds.join(", ")}. To analyze these images, delegate to visual-reviewer and pass the image ID(s). visual-reviewer can retrieve images via the \`image_get\` MCP tool.]`
-					output.parts.unshift({ type: "text", text: notification })
+
+					const injectedPart: { type: string; text?: string } = {
+						type: "text",
+						text: notification,
+						id: partId,
+						sessionID: partSessionID,
+						messageID: partMessageID,
+					}
+					output.parts.unshift(injectedPart)
 
 					return
 				}
@@ -615,11 +632,24 @@ const ImagePlugin: Plugin = async (ctx) => {
 			// Guard: no images tracked for this session (Law 1: Early Exit)
 			if (!imageIds || imageIds.length === 0) return
 
-			// Inject system notification with image IDs
+			// Generate proper TextPart with required fields (id, sessionID, messageID)
+			// Get messageID and sessionID from the first existing part as reference
+			const refPartFallback = output.parts.length > 0 ? (output.parts[0] as Record<string, unknown>) : {}
+			const partIdFallback = `part_img_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
+			const partSessionIDFallback = (refPartFallback.sessionID as string) || input.sessionID || ""
+			const partMessageIDFallback = (refPartFallback.messageID as string) || ""
+
 			const notification = `[System: User has attached ${imageIds.length} image(s). Image ID(s): ${imageIds.join(", ")}. To analyze these images, delegate to visual-reviewer and pass the image ID(s). visual-reviewer can retrieve images via the \`image_get\` MCP tool.]`
 
 			output.parts = output.parts ?? []
-			output.parts.unshift({ type: "text", text: notification })
+			const injectedPartFallback: { type: string; text?: string } = {
+				type: "text",
+				text: notification,
+				id: partIdFallback,
+				sessionID: partSessionIDFallback,
+				messageID: partMessageIDFallback,
+			}
+			output.parts.unshift(injectedPartFallback)
 		},
 	}
 }
