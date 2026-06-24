@@ -292,21 +292,26 @@ async function indexImage(
 		// Check if already exists (idempotent)
 		try {
 			await fs.access(imagePath)
-			// Already exists, return same ID
-			return imageId
 		} catch {
 			// Doesn't exist, create
+			// Save image file
+			await fs.writeFile(imagePath, buffer)
+
+			// Save metadata
+			await fs.writeFile(metaPath, JSON.stringify({
+				source: imageUrl.slice(0, 100),
+				mimeType,
+				timestamp: new Date().toISOString(),
+			}, null, 2))
 		}
 
-		// Save image file
-		await fs.writeFile(imagePath, buffer)
-
-		// Save metadata
-		await fs.writeFile(metaPath, JSON.stringify({
-			source: imageUrl.slice(0, 100),
-			mimeType,
-			timestamp: new Date().toISOString(),
-		}, null, 2))
+		// Write session mapping file (allows MCP to find image without session_id)
+		// Always written, even for duplicate images, to ensure the mapping exists
+		await fs.writeFile(
+			path.join(sessionDir, imageId + ".session"),
+			rootSessionID,
+			"utf8",
+		)
 
 		return imageId
 	} catch (error) {
@@ -588,7 +593,7 @@ const ImagePlugin: Plugin = async (ctx) => {
 					const partSessionID = (refPart.sessionID as string) || input.sessionID || ""
 					const partMessageID = (refPart.messageID as string) || ""
 
-					const notification = `[System: User has attached ${indexedIds.length} image(s). Image ID(s): ${indexedIds.join(", ")}. Session: ${rootID}. To retrieve these images, use \`image_get\` with session_id="${rootID}" and the image ID.]`
+					const notification = `[System: User has attached ${indexedIds.length} image(s). Image ID(s): ${indexedIds.join(", ")}. To retrieve these images, use the \`image_get\` MCP tool with the image ID.]`
 
 					const injectedPart: { type: string; text?: string } = {
 						type: "text",
@@ -639,7 +644,7 @@ const ImagePlugin: Plugin = async (ctx) => {
 			const partSessionIDFallback = (refPartFallback.sessionID as string) || input.sessionID || ""
 			const partMessageIDFallback = (refPartFallback.messageID as string) || ""
 
-			const notification = `[System: User has attached ${imageIds.length} image(s). Image ID(s): ${imageIds.join(", ")}. Session: ${rootID}. To retrieve these images, use \`image_get\` with session_id="${rootID}" and the image ID.]`
+			const notification = `[System: User has attached ${imageIds.length} image(s). Image ID(s): ${imageIds.join(", ")}. To retrieve these images, use the \`image_get\` MCP tool with the image ID.]`
 
 			output.parts = output.parts ?? []
 			const injectedPartFallback: { type: string; text?: string } = {

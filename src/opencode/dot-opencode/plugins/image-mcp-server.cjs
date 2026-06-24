@@ -309,63 +309,101 @@ function finishImageAdd(sessionDir, buffer, mimeType, sourceType, originalSource
 }
 
 function handleImageList(args) {
-  // Guard: validate required parameters (Law 1: Early Exit)
-  if (!args.session_id) throw new Error("Missing required parameter: \"session_id\"");
+  const sessionId = args?.session_id;
 
-  let sessionDir;
-  try {
-    sessionDir = getSessionDir(PROJECT_ID, args.session_id, false);
-  } catch (e) {
-    if (e.code === "ENOENT") return { images: [] };
-    throw e;
+  const images = [];
+
+  // Collect session directories
+  let sessionDirs = [];
+  if (sessionId) {
+    sessionDirs = [validateSessionId(sessionId)];
+  } else {
+    const basePath = path.join(STORAGE_BASE, PROJECT_ID);
+    if (fs.existsSync(basePath)) {
+      const entries = fs.readdirSync(basePath, { withFileTypes: true });
+      sessionDirs = entries.filter(e => e.isDirectory()).map(e => e.name);
+    }
   }
 
-  if (!fs.existsSync(sessionDir)) {
-    return { images: [] };
+  for (const dir of sessionDirs) {
+    const sessionDir = path.join(STORAGE_BASE, PROJECT_ID, dir);
+    try {
+      const files = fs.readdirSync(sessionDir);
+      const jsonFiles = files.filter(f => f.endsWith(".json"));
+      for (const jf of jsonFiles) {
+        const metaRaw = fs.readFileSync(path.join(sessionDir, jf), "utf8");
+        const meta = JSON.parse(metaRaw);
+        images.push({
+          id: jf.replace(".json", ""),
+          description: meta.description || "",
+          mime_type: meta.mimeType || "image/png",
+          session_id: dir,
+        });
+      }
+    } catch (e) {
+      // skip inaccessible dirs
+    }
   }
-
-  const entries = readMetadata(sessionDir);
-  const images = entries.map((entry) => ({
-    id: entry.id,
-    description: entry.description,
-    source_type: entry.source_type,
-    mime_type: entry.mime_type,
-    created_at: entry.created_at,
-  }));
 
   return { images };
 }
 
 function handleImageGet(args) {
-  // Guard: validate required parameters (Law 1: Early Exit)
-  if (!args.session_id) throw new Error("Missing required parameter: \"session_id\"");
-  if (!args.id) throw new Error("Missing required parameter: \"id\"");
+  const id = args.id;
+  if (!id) throw new Error("Missing required parameter: \"id\"");
 
-  const sessionDir = getSessionDir(PROJECT_ID, args.session_id, false);
-  const entries = readMetadata(sessionDir);
+  const safeId = id.replace(/[^a-zA-Z0-9_-]/g, "");
+  if (!safeId.startsWith("img_")) throw new Error(`Invalid image ID: "${id}"`);
 
-  // Guard: find entry by ID (Law 1: Early Exit)
-  const entry = entries.find((e) => e.id === args.id);
-  if (!entry) {
-    throw new Error(`Image not found: ${args.id}`);
+  const sessionId = args.session_id;
+
+  // Determine which session directory to use
+  let sessionDir;
+  if (sessionId) {
+    // Explicit session — use it directly
+    sessionDir = path.join(STORAGE_BASE, PROJECT_ID, validateSessionId(sessionId));
+    // Verify the session exists (will throw ENOENT if not)
+    const stat = fs.statSync(sessionDir);
+    if (!stat.isDirectory()) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+  } else {
+    // No session_id — look for .session mapping file in all session dirs
+    const basePath = path.join(STORAGE_BASE, PROJECT_ID);
+    const entries = fs.readdirSync(basePath, { withFileTypes: true });
+    let found = false;
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const sessionFilePath = path.join(basePath, entry.name, safeId + ".session");
+      if (fs.existsSync(sessionFilePath)) {
+        // Read the mapped session ID from the file
+        const mappedSessionId = fs.readFileSync(sessionFilePath, "utf8").trim();
+        sessionDir = path.join(STORAGE_BASE, PROJECT_ID, mappedSessionId);
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      throw new Error(`Image not found: ${safeId}`);
+    }
   }
 
-  const ext = getExtension(entry.mime_type);
-  const imagePath = path.join(sessionDir, entry.id + "." + ext);
+  // Load metadata and image data
+  const metaPath = path.join(sessionDir, safeId + ".json");
+  const dirFiles = fs.readdirSync(sessionDir);
+  const imgFile = dirFiles.find(f => f.startsWith(safeId) && !f.endsWith(".json") && !f.endsWith(".session"));
+  if (!imgFile) throw new Error(`No data file for image: ${safeId}`);
 
-  // Guard: verify image file exists (Law 1: Early Exit)
-  if (!fs.existsSync(imagePath)) {
-    throw new Error(`Image file not found for: ${args.id}`);
-  }
-
-  const buffer = fs.readFileSync(imagePath);
-  const data = buffer.toString("base64");
+  const metaRaw = fs.readFileSync(metaPath, "utf8");
+  const meta = JSON.parse(metaRaw);
+  const dataPath = path.join(sessionDir, imgFile);
+  const data = fs.readFileSync(dataPath);
 
   return {
-    id: entry.id,
-    description: entry.description,
-    mime_type: entry.mime_type,
-    data: data,
+    id: safeId,
+    description: meta.description || "",
+    mime_type: meta.mimeType || "image/png",
+    data: data.toString("base64"),
   };
 }
 
@@ -460,34 +498,25 @@ const TOOLS = [
   },
   {
     name: "image_list",
-    description: "List all stored images for a session.",
+    description: "List all images. session_id is optional — lists all images across all sessions if omitted.",
     inputSchema: {
       type: "object",
       properties: {
-        session_id: {
-          type: "string",
-          description: "Session scope identifier (alphanumeric, hyphens, underscores)",
-        },
+        session_id: { type: "string", description: "Optional session scope. If omitted, lists all sessions." },
       },
-      required: ["session_id"],
+      required: [],
     },
   },
   {
     name: "image_get",
-    description: "Retrieve a stored image by ID. Returns base64-encoded data.",
+    description: "Get an image by ID. If session_id is not provided, automatically finds the image across sessions.",
     inputSchema: {
       type: "object",
       properties: {
-        session_id: {
-          type: "string",
-          description: "Session scope identifier (alphanumeric, hyphens, underscores)",
-        },
-        id: {
-          type: "string",
-          description: "Image ID (e.g., img_a1b2c3d)",
-        },
+        id: { type: "string", description: "Image ID (e.g. img_abc12345)" },
+        session_id: { type: "string", description: "Optional session scope. If omitted, finds image automatically via session mapping." },
       },
-      required: ["session_id", "id"],
+      required: ["id"],
     },
   },
   {
@@ -538,11 +567,9 @@ function dispatchTool(name, args) {
       return handleImageAdd(args);
     }
     case "image_list": {
-      validateArgs(args, ["session_id"]);
       return handleImageList(args);
     }
     case "image_get": {
-      validateArgs(args, ["session_id", "id"]);
       return handleImageGet(args);
     }
     case "image_get_url": {

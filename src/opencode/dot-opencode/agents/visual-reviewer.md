@@ -48,7 +48,7 @@ Use these tools when the build provides a live URL rather than screenshots.
 1. **Load Skill** — Load `visual-review` using the skill tool
 2. **Gather Input** — Accept screenshots (files or URLs) and/or a live URL
 3. **Analyze** — Apply visual review methodology from skill checklist
-4. **Fetch Images** — If the task includes image IDs, use `image_get(session_id, id)` to retrieve them before analysis
+4. **Fetch Images** — If the task includes image IDs, use `image_get(id)` to retrieve them before analysis (session is found automatically)
 5. **Report** — Structured output with findings and severity
 
 ## Image MCP Tools
@@ -56,23 +56,23 @@ Use these tools when the build provides a live URL rather than screenshots.
 You have access to MCP tools for image management:
 
 - `image_add(source, description, session_id)` — Add an image to the index (from URL, local path, or data URI)
-- `image_list(session_id)` — List all images in a session
-- `image_get(session_id, id)` — Retrieve an image by ID (returns base64 data)
+- `image_list(session_id?)` — List all images. session_id is optional — lists all sessions if omitted.
+- `image_get(id, session_id?)` — Retrieve an image by ID. session_id is optional — finds image across sessions automatically.
 - `image_get_url(url)` — Fetch an image directly from a URL (returns base64, no indexing)
 - `image_clear_session(session_id)` — Clear all images for a session
 
 ### Usage Flow
 
 1. The orchestrator (build agent) may pass you image IDs like `img_a1b2c3` in the task description
-2. The orchestration agent's message includes the Session ID in the notification text. The visual-reviewer calls `image_get` with session_id set to that value and the image ID from the notification.
+2. The visual-reviewer retrieves images using `image_get` with just the image ID — the tool finds the correct session automatically.
 3. The returned base64 data can be analyzed by your vision model
 4. Alternatively, use `image_get_url` for direct URL-based image retrieval without indexing
 
 ### Example
 
 **Example:**
-- Orchestrator notification: `[System: User has attached 1 image(s). Image ID(s): img_abc12345. Session: ses_main. To retrieve these images, use \`image_get\` with session_id="ses_main" and the image ID.]`
-- visual-reviewer call: `image_get(session_id="ses_main", id="img_abc12345")`
+- Orchestrator notification: `[System: User has attached 1 image(s). Image ID(s): img_abc12345. To retrieve, use the \`image_get\` MCP tool with the image ID.]`
+- visual-reviewer call: `image_get(id="img_abc12345")`
 
 This returns `{ id, description, mime_type, data: base64 }` — pass the base64 data to your vision model for analysis.
 
