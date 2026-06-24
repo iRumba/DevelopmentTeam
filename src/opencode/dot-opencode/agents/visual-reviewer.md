@@ -64,18 +64,15 @@ You have access to MCP tools for image management:
 ### Usage Flow
 
 1. The orchestrator (build agent) may pass you image IDs like `img_a1b2c3` in the task description
-2. Use `image_get` with the `session_id` (passed by the orchestrator alongside the image ID) to retrieve the image data
+2. The orchestration agent's message includes the Session ID in the notification text. The visual-reviewer calls `image_get` with session_id set to that value and the image ID from the notification.
 3. The returned base64 data can be analyzed by your vision model
 4. Alternatively, use `image_get_url` for direct URL-based image retrieval without indexing
 
 ### Example
 
-When the orchestrator says: "Analyze this image: img_abc12345 in session sess_main"
-
-Call:
-```
-image_get(session_id="sess_main", id="img_abc12345")
-```
+**Example:**
+- Orchestrator notification: `[System: User has attached 1 image(s). Image ID(s): img_abc12345. Session: ses_main. To retrieve these images, use \`image_get\` with session_id="ses_main" and the image ID.]`
+- visual-reviewer call: `image_get(session_id="ses_main", id="img_abc12345")`
 
 This returns `{ id, description, mime_type, data: base64 }` — pass the base64 data to your vision model for analysis.
 

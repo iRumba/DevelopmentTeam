@@ -588,7 +588,7 @@ const ImagePlugin: Plugin = async (ctx) => {
 					const partSessionID = (refPart.sessionID as string) || input.sessionID || ""
 					const partMessageID = (refPart.messageID as string) || ""
 
-					const notification = `[System: User has attached ${indexedIds.length} image(s). Image ID(s): ${indexedIds.join(", ")}. To analyze these images, delegate to visual-reviewer and pass the image ID(s). visual-reviewer can retrieve images via the \`image_get\` MCP tool.]`
+					const notification = `[System: User has attached ${indexedIds.length} image(s). Image ID(s): ${indexedIds.join(", ")}. Session: ${rootID}. To retrieve these images, use \`image_get\` with session_id="${rootID}" and the image ID.]`
 
 					const injectedPart: { type: string; text?: string } = {
 						type: "text",
@@ -639,7 +639,7 @@ const ImagePlugin: Plugin = async (ctx) => {
 			const partSessionIDFallback = (refPartFallback.sessionID as string) || input.sessionID || ""
 			const partMessageIDFallback = (refPartFallback.messageID as string) || ""
 
-			const notification = `[System: User has attached ${imageIds.length} image(s). Image ID(s): ${imageIds.join(", ")}. To analyze these images, delegate to visual-reviewer and pass the image ID(s). visual-reviewer can retrieve images via the \`image_get\` MCP tool.]`
+			const notification = `[System: User has attached ${imageIds.length} image(s). Image ID(s): ${imageIds.join(", ")}. Session: ${rootID}. To retrieve these images, use \`image_get\` with session_id="${rootID}" and the image ID.]`
 
 			output.parts = output.parts ?? []
 			const injectedPartFallback: { type: string; text?: string } = {
