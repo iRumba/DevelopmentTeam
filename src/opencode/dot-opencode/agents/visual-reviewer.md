@@ -29,7 +29,7 @@ Before ANY review, you MUST load the `visual-review` skill. This is non-negotiab
 | `webfetch` | Fetch images from remote URLs |
 | `websearch` | Search for design references, documentation |
 | `task` → `explorer` | Ask about codebase structure if needed |
-| `image_get` / `image_get_url` | Retrieve images via MCP (image server) for vision model analysis |
+| `image_get` / `image_get_url` | Retrieve images via plugin tools for vision model analysis |
 
 ## Playwright MCP (Browser Automation)
 
@@ -48,33 +48,32 @@ Use these tools when the build provides a live URL rather than screenshots.
 1. **Load Skill** — Load `visual-review` using the skill tool
 2. **Gather Input** — Accept screenshots (files or URLs) and/or a live URL
 3. **Analyze** — Apply visual review methodology from skill checklist
-4. **Fetch Images** — If the task includes image IDs, use `image_get(id)` to retrieve them before analysis (session is found automatically)
+4. **Fetch Images** — If the task includes image IDs, use `image_get(id)` to retrieve them before analysis (session is found automatically via plugin tool)
 5. **Report** — Structured output with findings and severity
 
-## Image MCP Tools
+## Image Tools (Plugin)
 
-You have access to MCP tools for image management:
+You have access to plugin-native tools for image retrieval:
 
-- `image_add(source, description, session_id)` — Add an image to the index (from URL, local path, or data URI)
-- `image_list(session_id?)` — List all images. session_id is optional — lists all sessions if omitted.
-- `image_get(id, session_id?)` — Retrieve an image by ID. session_id is optional — finds image across sessions automatically.
-- `image_get_url(url)` — Fetch an image directly from a URL (returns base64, no indexing)
-- `image_clear_session(session_id)` — Clear all images for a session
+- `image_get(id: string)` — Retrieve an image by ID. Scans all sessions to find the image automatically. Returns `{ mimeType, data: base64 }`.
+- `image_list()` — List all available image IDs with metadata.
+- `image_get_url(url: string)` — Fetch an image directly from a URL or data URI (returns base64, no indexing).
+- `image_clear_session()` — Clear all images for the current session (idempotent).
 
 ### Usage Flow
 
 1. The orchestrator (build agent) may pass you image IDs like `img_a1b2c3` in the task description
-2. The visual-reviewer retrieves images using `image_get` with just the image ID — the tool finds the correct session automatically.
+2. The visual-reviewer retrieves images using `image_get` with just the image ID — the tool finds the correct session automatically
 3. The returned base64 data can be analyzed by your vision model
 4. Alternatively, use `image_get_url` for direct URL-based image retrieval without indexing
 
 ### Example
 
 **Example:**
-- Orchestrator notification: `[System: User has attached 1 image(s). Image ID(s): img_abc12345. To retrieve, use the \`image_get\` MCP tool with the image ID.]`
+- Orchestrator notification: `[System: User has attached 1 image(s). Image ID(s): img_abc12345. To retrieve, use the \`image_get\` tool with the image ID.]`
 - visual-reviewer call: `image_get(id="img_abc12345")`
 
-This returns `{ id, description, mime_type, data: base64 }` — pass the base64 data to your vision model for analysis.
+This returns `{ mimeType, data: base64 }` — pass the base64 data to your vision model for analysis.
 
 ## FORBIDDEN ACTIONS
 

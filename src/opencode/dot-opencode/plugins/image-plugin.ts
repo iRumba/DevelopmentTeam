@@ -12,7 +12,7 @@
  * - Injects image IDs into chat.message output for agent awareness
  * - Cleans up on session.idle by removing the session's image directory
  *
- * The MCP server (image-mcp-server.cjs) handles reading for agents (visual-reviewer).
+ * Plugin-native tools handle reading for agents (visual-reviewer).
  *
  * Philosophy: Elegant Defense (Guard Clauses, Fail Fast, Intentional Naming)
  */
@@ -24,7 +24,7 @@ import * as os from "node:os"
 import * as https from "node:https"
 import * as http from "node:http"
 
-import type { Plugin } from "@opencode-ai/plugin"
+import { type Plugin, tool } from "@opencode-ai/plugin"
 import type { OpencodeClient } from "./kdco-primitives/types"
 import { getProjectId } from "./kdco-primitives/get-project-id"
 
@@ -245,7 +245,6 @@ function getExtension(mimeType: string): string {
  * @param client - OpenCode client for logging
  * @param imageUrl - The image URL or data URI to index
  * @param rootSessionID - The root session ID for scoping
- * @param _sessionID - The current session ID (unused in filesystem version, kept for signature compat)
  * @param storageBase - The base storage directory for images
  * @returns The image ID if indexed, null otherwise
  */
@@ -253,7 +252,6 @@ async function indexImage(
 	client: OpencodeClient,
 	imageUrl: string,
 	rootSessionID: string,
-	_sessionID: string,
 	storageBase: string,
 ): Promise<string | null> {
 	try {
@@ -304,14 +302,6 @@ async function indexImage(
 				timestamp: new Date().toISOString(),
 			}, null, 2))
 		}
-
-		// Write session mapping file (allows MCP to find image without session_id)
-		// Always written, even for duplicate images, to ensure the mapping exists
-		await fs.writeFile(
-			path.join(sessionDir, imageId + ".session"),
-			rootSessionID,
-			"utf8",
-		)
 
 		return imageId
 	} catch (error) {
@@ -415,7 +405,7 @@ const ImagePlugin: Plugin = async (ctx) => {
 		const rootSessionID = await getRootSessionID(client as unknown as OpencodeClient, sessionID)
 
 		// Index the image to filesystem
-		const imageId = await indexImage(client as unknown as OpencodeClient, imageUrl, rootSessionID, sessionID, storageBase)
+		const imageId = await indexImage(client as unknown as OpencodeClient, imageUrl, rootSessionID, storageBase)
 
 		// Guard: indexing failed (Law 1: Early Exit)
 		if (!imageId) return
@@ -557,7 +547,7 @@ const ImagePlugin: Plugin = async (ctx) => {
 
 				const results = await Promise.all(
 					imageUrls.map((url) =>
-						indexImage(client as unknown as OpencodeClient, url, rootID, input.sessionID, storageBase)
+						indexImage(client as unknown as OpencodeClient, url, rootID, storageBase)
 					)
 				)
 				for (const imageId of results) {
@@ -593,7 +583,7 @@ const ImagePlugin: Plugin = async (ctx) => {
 					const partSessionID = (refPart.sessionID as string) || input.sessionID || ""
 					const partMessageID = (refPart.messageID as string) || ""
 
-					const notification = `[System: User has attached ${indexedIds.length} image(s). Image ID(s): ${indexedIds.join(", ")}. To retrieve these images, use the \`image_get\` MCP tool with the image ID.]`
+					const notification = `[System: User has attached ${indexedIds.length} image(s). Image ID(s): ${indexedIds.join(", ")}. To retrieve these images, use the \`image_get\` tool with the image ID.]`
 
 					const injectedPart: { type: string; text?: string } = {
 						type: "text",
@@ -644,7 +634,7 @@ const ImagePlugin: Plugin = async (ctx) => {
 			const partSessionIDFallback = (refPartFallback.sessionID as string) || input.sessionID || ""
 			const partMessageIDFallback = (refPartFallback.messageID as string) || ""
 
-			const notification = `[System: User has attached ${imageIds.length} image(s). Image ID(s): ${imageIds.join(", ")}. To retrieve these images, use the \`image_get\` MCP tool with the image ID.]`
+			const notification = `[System: User has attached ${imageIds.length} image(s). Image ID(s): ${imageIds.join(", ")}. To retrieve these images, use the \`image_get\` tool with the image ID.]`
 
 			output.parts = output.parts ?? []
 			const injectedPartFallback: { type: string; text?: string } = {
@@ -655,6 +645,210 @@ const ImagePlugin: Plugin = async (ctx) => {
 				messageID: partMessageIDFallback,
 			}
 			output.parts.unshift(injectedPartFallback)
+		},
+
+		tool: {
+			image_get: tool({
+				description: "Get an image by ID. Scans all sessions to find the image automatically. Returns { mimeType, data: base64 }.",
+				args: {
+					id: tool.schema.string().describe("Image ID (e.g. img_abc12345)"),
+				},
+				async execute(args, toolCtx) {
+					const { id } = args
+					if (!id) return "❌ image_get: id is required"
+					if (!id.startsWith("img_")) return `❌ image_get: invalid image ID: "${id}"`
+
+					// Compute storage base (uses directory from toolCtx)
+					try {
+						const pid = await getProjectId(toolCtx.directory)
+						const baseDir = getStorageBase(pid)
+
+						// Scan all session directories
+						let entries: string[]
+						try {
+							entries = await fs.readdir(baseDir)
+						} catch {
+							return `❌ Image not found: ${id}`
+						}
+
+						for (const entry of entries) {
+							const sessionDir = path.join(baseDir, entry)
+							let dirEntries: string[]
+							try {
+								dirEntries = await fs.readdir(sessionDir)
+							} catch {
+								continue
+							}
+
+							// Look for image file and metadata
+							const imgFile = dirEntries.find(
+								(f) => f.startsWith(id) && !f.endsWith(".json") && !f.endsWith(".session"),
+							)
+							if (!imgFile) continue
+
+							// Found it — read metadata and data
+							const metaFile = dirEntries.find((f) => f === `${id}.json`)
+							let mimeType = "image/png"
+							if (metaFile) {
+								try {
+									const metaRaw = await fs.readFile(path.join(sessionDir, metaFile), "utf-8")
+									const meta = JSON.parse(metaRaw)
+									if (meta.mimeType) mimeType = meta.mimeType
+								} catch {
+									/* use default */
+								}
+							}
+
+							const dataPath = path.join(sessionDir, imgFile)
+							const dataBuffer = await fs.readFile(dataPath)
+							const data = dataBuffer.toString("base64")
+
+							return JSON.stringify({ mimeType, data })
+						}
+
+						return `❌ Image not found: ${id}`
+					} catch (err) {
+						return `❌ image_get failed: ${err instanceof Error ? err.message : String(err)}`
+					}
+				},
+			}),
+
+			image_list: tool({
+				description: "List all available image IDs with metadata across all sessions.",
+				args: {},
+				async execute(_args, toolCtx) {
+					try {
+						const pid = await getProjectId(toolCtx.directory)
+						const baseDir = getStorageBase(pid)
+
+						const images: Array<{ id: string; mimeType: string; sessionID: string }> = []
+
+						let entries: string[]
+						try {
+							entries = await fs.readdir(baseDir)
+						} catch {
+							return JSON.stringify({ images })
+						}
+
+						for (const entry of entries) {
+							const sessionDir = path.join(baseDir, entry)
+							let dirEntries: string[]
+							try {
+								dirEntries = await fs.readdir(sessionDir)
+							} catch {
+								continue
+							}
+
+							for (const file of dirEntries) {
+								if (file.endsWith(".json") && !file.startsWith("_")) {
+									const imageId = file.replace(".json", "")
+									// Verify image data file exists (avoid stale metadata)
+									const dataFileExists = dirEntries.some(
+										(f) =>
+											f.startsWith(imageId) &&
+											!f.endsWith(".json") &&
+											!f.endsWith(".session"),
+									)
+									if (!dataFileExists) continue
+
+									let mimeType = "image/png"
+									try {
+										const metaRaw = await fs.readFile(path.join(sessionDir, file), "utf-8")
+										const meta = JSON.parse(metaRaw)
+										if (meta.mimeType) mimeType = meta.mimeType
+									} catch {
+										/* use default */
+									}
+
+									images.push({
+										id: imageId,
+										mimeType,
+										sessionID: entry,
+									})
+								}
+							}
+						}
+
+						return JSON.stringify({ images })
+					} catch (err) {
+						return `❌ image_list failed: ${err instanceof Error ? err.message : String(err)}`
+					}
+				},
+			}),
+
+			image_get_url: tool({
+				description:
+					"Download an image from a URL and return base64 data without storing it. Supports http(s):// URLs and data: URIs.",
+				args: {
+					url: tool.schema.string().describe("Image URL (http(s)://) or data: URI"),
+				},
+				async execute(args, _toolCtx) {
+					const { url } = args
+					if (!url) return "❌ image_get_url: url is required"
+
+					try {
+						let buffer: Buffer
+						let mimeType: string
+
+						if (url.startsWith("data:")) {
+							const match = url.match(/^data:(image\/[^;]+);base64,(.+)$/)
+							if (!match) return "❌ Invalid data URI format"
+							mimeType = match[1]
+							buffer = Buffer.from(match[2], "base64")
+						} else if (url.startsWith("http://") || url.startsWith("https://")) {
+							const result = await downloadUrl(url)
+							buffer = result.buffer
+							mimeType = result.mimeType
+						} else {
+							return "❌ image_get_url: unsupported URL type (use http(s):// or data: URI)"
+						}
+
+						return JSON.stringify({ mimeType, data: buffer.toString("base64") })
+					} catch (err) {
+						return `❌ image_get_url failed: ${err instanceof Error ? err.message : String(err)}`
+					}
+				},
+			}),
+
+			image_clear_session: tool({
+				description:
+					"Remove all stored images for the current session. Idempotent — safe to call even if no images exist.",
+				args: {},
+				async execute(_args, toolCtx) {
+					// Uses the plugin context's current session for scoping
+					try {
+						if (!toolCtx?.sessionID) return "❌ image_clear_session: no active session"
+
+						const pid = await getProjectId(toolCtx.directory)
+						const baseDir = getStorageBase(pid)
+
+						// Resolve root session for directory cleanup
+						const rootSessionID = await getRootSessionID(
+							client as unknown as OpencodeClient,
+							toolCtx.sessionID,
+						)
+
+						const sessionDir = path.join(baseDir, rootSessionID)
+						try {
+							await fs.rm(sessionDir, { recursive: true, force: true })
+						} catch {
+							// Directory may not exist — idempotent
+						}
+
+						// Clean up in-memory maps
+						imageMap.delete(rootSessionID)
+						for (const [cachedID, cachedRoot] of rootSessionCache) {
+							if (cachedRoot === rootSessionID) {
+								rootSessionCache.delete(cachedID)
+							}
+						}
+
+						return `✅ Cleared images for session: ${rootSessionID}`
+					} catch (err) {
+						return `❌ image_clear_session failed: ${err instanceof Error ? err.message : String(err)}`
+					}
+				},
+			}),
 		},
 	}
 }

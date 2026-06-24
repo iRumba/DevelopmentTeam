@@ -216,14 +216,6 @@
       "type": "local",
       "command": ["node", "./.opencode/plugins/jsonc-mcp-server.cjs"],
       "enabled": true
-    },
-    "image": {
-      "type": "local",
-      "command": [
-        "node",
-        "./.opencode/plugins/image-mcp-server.cjs"
-      ],
-      "enabled": true
     }
   },
   "plugin": [
