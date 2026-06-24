@@ -584,7 +584,7 @@ const ImagePlugin: Plugin = async (ctx) => {
 					// Generate proper TextPart with required fields (id, sessionID, messageID)
 					// Using first image part as reference for sessionID and messageID
 					const refPart = firstImagePart ?? {}
-					const partId = `part_img_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
+					const partId = `prt_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
 					const partSessionID = (refPart.sessionID as string) || input.sessionID || ""
 					const partMessageID = (refPart.messageID as string) || ""
 
@@ -635,7 +635,7 @@ const ImagePlugin: Plugin = async (ctx) => {
 			// Generate proper TextPart with required fields (id, sessionID, messageID)
 			// Get messageID and sessionID from the first existing part as reference
 			const refPartFallback = output.parts.length > 0 ? (output.parts[0] as Record<string, unknown>) : {}
-			const partIdFallback = `part_img_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
+			const partIdFallback = `prt_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
 			const partSessionIDFallback = (refPartFallback.sessionID as string) || input.sessionID || ""
 			const partMessageIDFallback = (refPartFallback.messageID as string) || ""
 
