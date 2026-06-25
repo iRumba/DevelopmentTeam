@@ -48,7 +48,7 @@ Use these tools when the build provides a live URL rather than screenshots.
 1. **Load Skill** — Load `visual-review` using the skill tool
 2. **Gather Input** — Accept screenshots (files or URLs) and/or a live URL
 3. **Analyze** — Apply visual review methodology from skill checklist
-4. **Fetch Images** — If the task includes image IDs, use `image_get(id)` to retrieve them before analysis (session is found automatically via plugin tool)
+4. **Analyze Images** — Images arrive in your prompt as native visual content (FilePart with data URI). The orchestrator uses `[img id=xxx]` / `[img url=...]` markers which the plugin automatically resolves to images before delivery. No extra tool calls needed for standard review.
 5. **Report** — Structured output with findings and severity
 
 ## Image Tools (Plugin)
@@ -62,6 +62,8 @@ You have access to plugin-native tools for image retrieval:
 
 ### Usage Flow
 
+- **Primary flow:** The orchestrator embeds `[img id=xxx]` markers in your task prompt. The image-plugin intercepts these markers and replaces them with native `FilePart` data URIs. Your vision model receives the images directly — no action needed from you.
+
 1. The orchestrator (build agent) may pass you image IDs like `img_a1b2c3` in the task description
 2. The visual-reviewer retrieves images using `image_get` with just the image ID — the tool finds the correct session automatically
 3. The returned base64 data can be analyzed by your vision model
@@ -74,6 +76,11 @@ You have access to plugin-native tools for image retrieval:
 - visual-reviewer call: `image_get(id="img_abc12345")`
 
 This returns a data URI string `data:image/png;base64,...` — the vision model can render it directly.
+
+**New example (primary flow):**
+- Orchestrator prompt: `Analyze this UI screenshot: [img id=img_a1b2c3d4]`
+- Plugin intercepts `[img id=img_a1b2c3d4]`, fetches the image data, injects a FilePart with `data:image/png;base64,...`
+- visual-reviewer sees the image natively in the prompt — no tool calls needed
 
 ## FORBIDDEN ACTIONS
 

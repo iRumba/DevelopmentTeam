@@ -228,6 +228,158 @@ function getExtension(mimeType: string): string {
 	return map[mimeType] || "bin"
 }
 
+/**
+ * Map file extension to MIME type (inverse of getExtension).
+ */
+const EXTENSION_MIME_MAP: Record<string, string> = {
+	".png": "image/png",
+	".jpg": "image/jpeg",
+	".jpeg": "image/jpeg",
+	".gif": "image/gif",
+	".webp": "image/webp",
+	".svg": "image/svg+xml",
+	".bmp": "image/bmp",
+}
+
+// ==========================================
+// EXTRACTED BASE HELPERS
+// ==========================================
+
+/**
+ * Scans all session subdirectories for an image matching the given ID.
+ * Reads metadata JSON for mime type and returns the raw buffer.
+ *
+ * @param id - Image ID (format: img_<hex_hash>)
+ * @param projectId - Project ID for storage directory scoping
+ * @returns { buffer, mimeType } or null if not found
+ */
+async function getImageDataUri(
+	id: string,
+	projectId: string,
+): Promise<{ buffer: Buffer; mimeType: string } | null> {
+	// Guard: id must start with "img_" (Law 1: Early Exit, Law 4: Fail Fast)
+	if (!id || !id.startsWith("img_")) return null
+
+	const baseDir = getStorageBase(projectId)
+
+	// Scan all session directories
+	let entries: string[]
+	try {
+		entries = await fs.readdir(baseDir)
+	} catch {
+		return null
+	}
+
+	for (const entry of entries) {
+		const sessionDir = path.join(baseDir, entry)
+		let dirEntries: string[]
+		try {
+			dirEntries = await fs.readdir(sessionDir)
+		} catch {
+			continue
+		}
+
+		// Look for image file matching the ID (skip .json and .session files)
+		const imgFile = dirEntries.find(
+			(f) => f.startsWith(id) && !f.endsWith(".json") && !f.endsWith(".session"),
+		)
+		if (!imgFile) continue
+
+		// Read metadata for mime type
+		const metaFile = dirEntries.find((f) => f === `${id}.json`)
+		let mimeType = "image/png"
+		if (metaFile) {
+			try {
+				const metaRaw = await fs.readFile(path.join(sessionDir, metaFile), "utf-8")
+				const meta = JSON.parse(metaRaw)
+				if (meta.mimeType) mimeType = meta.mimeType
+			} catch {
+				/* use default */
+			}
+		}
+
+		// Read the image buffer
+		const dataPath = path.join(sessionDir, imgFile)
+		const buffer = await fs.readFile(dataPath)
+		return { buffer, mimeType }
+	}
+
+	return null
+}
+
+/**
+ * Fetches image data from a URL, data URI, or local file path.
+ *
+ * Supported sources:
+ * - http(s):// URLs → downloads via downloadUrl()
+ * - data:image/...;base64,... → parses inline data
+ * - Local file paths → reads from filesystem, detects mime from extension
+ *
+ * @param url - Image source URL, data URI, or file path
+ * @returns { buffer, mimeType } or null on failure
+ */
+async function fetchImageFromUrl(
+	url: string,
+): Promise<{ buffer: Buffer; mimeType: string } | null> {
+	try {
+		if (url.startsWith("http://") || url.startsWith("https://")) {
+			return await downloadUrl(url)
+		}
+
+		if (url.startsWith("data:")) {
+			const match = url.match(/^data:(image\/[^;]+);base64,(.+)$/)
+			if (!match) return null
+			return {
+				buffer: Buffer.from(match[2], "base64"),
+				mimeType: match[1],
+			}
+		}
+
+		// Local file path: read and detect mime from extension
+		const ext = path.extname(url).toLowerCase()
+		const mimeType = EXTENSION_MIME_MAP[ext] || "image/png"
+		const buffer = await fs.readFile(url)
+		return { buffer, mimeType }
+	} catch {
+		return null
+	}
+}
+
+/**
+ * Converts a buffer and mime type to a data URI string.
+ *
+ * @param buffer - Image binary data
+ * @param mimeType - MIME type (e.g. "image/png")
+ * @returns data URI string like "data:image/png;base64,..."
+ */
+function toDataUri(buffer: Buffer, mimeType: string): string {
+	return `data:${mimeType};base64,${buffer.toString("base64")}`
+}
+
+/**
+ * Parse a duration string like "2d", "2d10h30m", "5d", "30m" into total milliseconds.
+ * Returns -1 if the string is invalid.
+ * Supported units: d (days), h (hours), m (minutes)
+ * Examples:
+ *   "2d" → 172800000
+ *   "2d10h30m" → 207000000
+ *   "30m" → 1800000
+ *   "5d" → 432000000
+ */
+function parseDuration(duration: string): number {
+	const regex = /^(\d+d)?(\d+h)?(\d+m)?$/
+	const match = duration.match(regex)
+	if (!match || (match[1] === undefined && match[2] === undefined && match[3] === undefined)) {
+		return -1
+	}
+
+	let total = 0
+	if (match[1]) total += parseInt(match[1]) * 24 * 60 * 60 * 1000  // days
+	if (match[2]) total += parseInt(match[2]) * 60 * 60 * 1000       // hours
+	if (match[3]) total += parseInt(match[3]) * 60 * 1000            // minutes
+	return total
+}
+
 // ==========================================
 // IMAGE INDEXING (FILESYSTEM)
 // ==========================================
@@ -420,7 +572,11 @@ const ImagePlugin: Plugin = async (ctx) => {
 	}
 
 	/**
-	 * Handle session.idle events: clean up indexed images and state.
+	 * Handle session.idle events: clean up in-memory state.
+	 * Images on disk are NOT deleted — they're content-addressed and
+	 * may be referenced by other sessions. The in-memory map is cleaned
+	 * up to free memory, but files persist until explicitly cleaned up
+	 * via the cleanup_images tool.
 	 */
 	async function handleSessionIdle(event: Record<string, unknown>): Promise<void> {
 		const properties = event.properties as Record<string, unknown> | undefined
@@ -433,33 +589,30 @@ const ImagePlugin: Plugin = async (ctx) => {
 		// Guard: sessionID required (Law 1: Early Exit)
 		if (!sessionID) return
 
-		// Resolve root session ID
 		const rootSessionID = await getRootSessionID(client as unknown as OpencodeClient, sessionID)
 
-		// M1: Only clear images if the idle session IS the root session.
-		// Child sessions become idle independently while the parent is still active.
+		// M1: Only clean up if the idle session IS the root session.
 		if (sessionID !== rootSessionID) return
 
-		// Clear images from filesystem (non-fatal if unavailable)
-		await clearSessionImages(storageBase, rootSessionID)
+		// M2: Do NOT delete images from disk — they're content-addressed and
+		// may be needed by other sessions. The in-memory map is cleaned up
+		// to free memory, but files persist until explicitly cleaned up.
 
-		// Clean up in-memory maps
+		// Clean up in-memory state only
 		imageMap.delete(rootSessionID)
 
-		// Remove all cache entries that resolve to this root session
 		for (const [cachedSessionID, cachedRootID] of rootSessionCache) {
 			if (cachedRootID === rootSessionID) {
 				rootSessionCache.delete(cachedSessionID)
 			}
 		}
 
-		// Log cleanup
 		client.app
 			.log({
 				body: {
 					service: "image-plugin",
 					level: "info",
-					message: `Cleaned up images for session ${rootSessionID}`,
+					message: `Cleaned up in-memory state for session ${rootSessionID}, images preserved on disk`,
 				},
 			})
 			.catch(() => {})
@@ -503,9 +656,101 @@ const ImagePlugin: Plugin = async (ctx) => {
 		},
 
 		"chat.message": async (
-			input: { sessionID?: string },
-			output: { parts?: Array<{ type: string; text?: string }> },
+			input: { sessionID?: string; agent?: string },
+			output: { parts?: Array<{ type: string; text?: string; id?: string; sessionID?: string; messageID?: string; mime?: string; url?: string }> },
 		): Promise<void> => {
+			// ──────────────────────────────────────────────────────
+			// MARKER DETECTION: runs BEFORE the sessionID guard
+			// so orchestrator-written [img id=xxx] markers are resolved
+			// even if sessionID is unavailable.
+			// Only resolve for visual-reviewer (vision-capable agent).
+			// Other agents (build, coder) are text-only — markers stay
+			// as plain text for them to pass through to visual-reviewer.
+			// ──────────────────────────────────────────────────────
+			if (input.agent === "visual-reviewer" && output.parts && output.parts.length > 0) {
+				const imgIdRegex = /\[img id=(img_[a-f0-9]+)\]/g
+				const imgUrlRegex = /\[img url=([^\]]+)\]/g
+
+				// Scan parts in reverse to preserve insertion order
+				for (let i = output.parts.length - 1; i >= 0; i--) {
+					const part = output.parts[i]
+					if (part.type !== "text" || !part.text) continue
+
+					let text = part.text
+					let hasChanges = false
+
+					// Process [img id=xxx] markers
+					const idMatches = [...text.matchAll(imgIdRegex)]
+					for (const match of idMatches) {
+						const [fullMatch, imageId] = match
+
+						try {
+							const pid = await getProjectId(directory)
+							const imageData = await getImageDataUri(imageId, pid)
+
+							if (!imageData) continue // Leave marker as-is if unresolvable
+
+							const dataUri = toDataUri(imageData.buffer, imageData.mimeType)
+
+							// Replace marker text with empty string
+							text = text.replace(fullMatch, "")
+							hasChanges = true
+
+							// Insert FilePart right before the original text part
+							const filePart = {
+								type: "file",
+								mime: imageData.mimeType,
+								url: dataUri,
+								id: `prt_img_${Date.now()}`,
+								sessionID: part.sessionID || input.sessionID || "",
+								messageID: part.messageID || "",
+							}
+							output.parts.splice(i, 0, filePart)
+						} catch {
+							continue // Leave marker as-is on error
+						}
+					}
+
+					// Reset regex lastIndex after previous scan
+					imgUrlRegex.lastIndex = 0
+
+					// Process [img url=...] markers
+					const urlMatches = [...text.matchAll(imgUrlRegex)]
+					for (const match of urlMatches) {
+						const [fullMatch, imageUrl] = match
+
+						try {
+							const imageData = await fetchImageFromUrl(imageUrl)
+
+							if (!imageData) continue // Leave marker as-is if unresolvable
+
+							const dataUri = toDataUri(imageData.buffer, imageData.mimeType)
+
+							// Replace marker text with empty string
+							text = text.replace(fullMatch, "")
+							hasChanges = true
+
+							// Insert FilePart right before the original text part
+							const filePart = {
+								type: "file",
+								mime: imageData.mimeType,
+								url: dataUri,
+								id: `prt_img_${Date.now()}`,
+								sessionID: part.sessionID || input.sessionID || "",
+								messageID: part.messageID || "",
+							}
+							output.parts.splice(i, 0, filePart)
+						} catch {
+							continue // Leave marker as-is on error
+						}
+					}
+
+					if (hasChanges) {
+						part.text = text
+					}
+				}
+			}
+
 			// Guard: sessionID and output parts required (Law 1: Early Exit)
 			if (!input.sessionID || !output.parts || output.parts.length === 0) return
 
@@ -522,6 +767,10 @@ const ImagePlugin: Plugin = async (ctx) => {
 
 			for (let i = 0; i < output.parts.length; i++) {
 				const part = output.parts[i] as Record<string, unknown>
+
+				// Skip FileParts already injected by marker detection (Law 1: Early Exit)
+				if ((part.id as string)?.startsWith("prt_img_")) continue
+
 				const imageUrl = extractImageUrl(part)
 				if (imageUrl) {
 					imagePartIndices.push(i)
@@ -583,7 +832,8 @@ const ImagePlugin: Plugin = async (ctx) => {
 					const partSessionID = (refPart.sessionID as string) || input.sessionID || ""
 					const partMessageID = (refPart.messageID as string) || ""
 
-					const notification = `[System: User has attached ${indexedIds.length} image(s). Image ID(s): ${indexedIds.join(", ")}. To retrieve these images, use the \`image_get\` tool with the image ID.]`
+					const imageMarkers = indexedIds.map((id) => `[img id=${id}]`).join(" ")
+					const notification = `[System: User has attached ${indexedIds.length} image(s). Image ID(s): ${indexedIds.join(", ")}. Markers: ${imageMarkers}]`
 
 					const injectedPart: { type: string; text?: string } = {
 						type: "text",
@@ -634,7 +884,8 @@ const ImagePlugin: Plugin = async (ctx) => {
 			const partSessionIDFallback = (refPartFallback.sessionID as string) || input.sessionID || ""
 			const partMessageIDFallback = (refPartFallback.messageID as string) || ""
 
-			const notification = `[System: User has attached ${imageIds.length} image(s). Image ID(s): ${imageIds.join(", ")}. To retrieve these images, use the \`image_get\` tool with the image ID.]`
+			const imageMarkers = imageIds.map((id) => `[img id=${id}]`).join(" ")
+			const notification = `[System: User has attached ${imageIds.length} image(s). Image ID(s): ${imageIds.join(", ")}. Markers: ${imageMarkers}]`
 
 			output.parts = output.parts ?? []
 			const injectedPartFallback: { type: string; text?: string } = {
@@ -655,58 +906,25 @@ const ImagePlugin: Plugin = async (ctx) => {
 				},
 				async execute(args, toolCtx) {
 					const { id } = args
+
+					// Guard: id required and must start with "img_" (Law 1: Early Exit, Law 4: Fail Fast)
 					if (!id) return "❌ image_get: id is required"
 					if (!id.startsWith("img_")) return `❌ image_get: invalid image ID: "${id}"`
 
-					// Compute storage base (uses directory from toolCtx)
 					try {
 						const pid = await getProjectId(toolCtx.directory)
-						const baseDir = getStorageBase(pid)
+						const result = await getImageDataUri(id, pid)
 
-						// Scan all session directories
-						let entries: string[]
-						try {
-							entries = await fs.readdir(baseDir)
-						} catch {
-							return `❌ Image not found: ${id}`
+						// Guard: image not found (Law 1: Early Exit)
+						if (!result) return `❌ Image not found: ${id}`
+
+						const dataUri = toDataUri(result.buffer, result.mimeType)
+						const size = result.buffer.length
+
+						return {
+							output: `Image retrieved: ${id} (${result.mimeType}, ${size} bytes)`,
+							attachments: [{ type: "file", mime: result.mimeType, url: dataUri }],
 						}
-
-						for (const entry of entries) {
-							const sessionDir = path.join(baseDir, entry)
-							let dirEntries: string[]
-							try {
-								dirEntries = await fs.readdir(sessionDir)
-							} catch {
-								continue
-							}
-
-							// Look for image file and metadata
-							const imgFile = dirEntries.find(
-								(f) => f.startsWith(id) && !f.endsWith(".json") && !f.endsWith(".session"),
-							)
-							if (!imgFile) continue
-
-							// Found it — read metadata and data
-							const metaFile = dirEntries.find((f) => f === `${id}.json`)
-							let mimeType = "image/png"
-							if (metaFile) {
-								try {
-									const metaRaw = await fs.readFile(path.join(sessionDir, metaFile), "utf-8")
-									const meta = JSON.parse(metaRaw)
-									if (meta.mimeType) mimeType = meta.mimeType
-								} catch {
-									/* use default */
-								}
-							}
-
-							const dataPath = path.join(sessionDir, imgFile)
-							const dataBuffer = await fs.readFile(dataPath)
-							const data = dataBuffer.toString("base64")
-
-							return `data:${mimeType};base64,${data}`
-						}
-
-						return `❌ Image not found: ${id}`
 					} catch (err) {
 						return `❌ image_get failed: ${err instanceof Error ? err.message : String(err)}`
 					}
@@ -846,6 +1064,73 @@ const ImagePlugin: Plugin = async (ctx) => {
 						return `✅ Cleared images for session: ${rootSessionID}`
 					} catch (err) {
 						return `❌ image_clear_session failed: ${err instanceof Error ? err.message : String(err)}`
+					}
+				},
+			}),
+
+			cleanup_images: tool({
+				description: "Clean up stored images. Without arguments, removes ALL images. With maxAge (e.g., '2d', '2d10h30m', '30m'), removes only images from sessions older than the specified duration.",
+				args: {
+					maxAge: tool.schema.string().optional().describe("Optional: max age of images to keep. Format: '2d', '2d10h30m', '30m'. Examples: '2d' = older than 2 days, '2d10h30m' = older than 2 days 10 hours 30 minutes, '30m' = older than 30 minutes."),
+				},
+				async execute(args, toolCtx) {
+					try {
+						const pid = await getProjectId(toolCtx.directory)
+						const baseDir = getStorageBase(pid)
+
+						let entries: string[]
+						try {
+							entries = await fs.readdir(baseDir)
+						} catch {
+							return "No images directory found."
+						}
+
+						let maxAgeMs: number | null = null
+						if (args.maxAge) {
+							maxAgeMs = parseDuration(args.maxAge)
+							if (maxAgeMs === -1) {
+								return `❌ Invalid duration format: "${args.maxAge}". Expected format like "2d", "2d10h30m", or "30m".`
+							}
+						}
+
+						const now = Date.now()
+						let removedCount = 0
+						let skippedCount = 0
+
+						for (const entry of entries) {
+							const sessionDir = path.join(baseDir, entry)
+
+							try {
+								if (maxAgeMs !== null) {
+									// Check directory modification time
+									const stat = await fs.stat(sessionDir)
+									const age = now - stat.mtimeMs
+									if (age < maxAgeMs) {
+										skippedCount++
+										continue  // Too young, keep it
+									}
+								}
+
+								// Remove the entire session directory
+								await fs.rm(sessionDir, { recursive: true, force: true })
+								removedCount++
+							} catch {
+								// Skip entries we can't process
+								continue
+							}
+						}
+
+						// Also clear in-memory maps since images are gone
+						imageMap.clear()
+						rootSessionCache.clear()
+
+						if (maxAgeMs !== null) {
+							return `Cleaned up ${removedCount} session(s) with images older than "${args.maxAge}". ${skippedCount} session(s) kept. In-memory state cleared.`
+						} else {
+							return `Cleaned up ${removedCount} session(s). All images removed. In-memory state cleared.`
+						}
+					} catch (err) {
+						return `❌ cleanup_images failed: ${err instanceof Error ? err.message : String(err)}`
 					}
 				},
 			}),
