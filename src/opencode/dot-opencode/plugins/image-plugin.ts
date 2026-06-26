@@ -320,16 +320,19 @@ async function getImageDataUri(
  */
 async function fetchImageFromUrl(
 	url: string,
-): Promise<{ buffer: Buffer; mimeType: string } | null> {
+	client?: OpencodeClient,
+): Promise<{ ok: true; buffer: Buffer; mimeType: string } | { ok: false; error: string }> {
 	try {
 		if (url.startsWith("http://") || url.startsWith("https://")) {
-			return await downloadUrl(url)
+			const result = await downloadUrl(url)
+			return { ok: true, ...result }
 		}
 
 		if (url.startsWith("data:")) {
 			const match = url.match(/^data:(image\/[^;]+);base64,(.+)$/)
-			if (!match) return null
+			if (!match) return { ok: false, error: "Invalid data URI format" }
 			return {
+				ok: true,
 				buffer: Buffer.from(match[2], "base64"),
 				mimeType: match[1],
 			}
@@ -339,9 +342,13 @@ async function fetchImageFromUrl(
 		const ext = path.extname(url).toLowerCase()
 		const mimeType = EXTENSION_MIME_MAP[ext] || "image/png"
 		const buffer = await fs.readFile(url)
-		return { buffer, mimeType }
-	} catch {
-		return null
+		return { ok: true, buffer, mimeType }
+	} catch (err) {
+		const errorMsg = `fetchImageFromUrl: failed to load "${url.slice(0, 120)}": ${err instanceof Error ? err.message : String(err)}`
+		if (client) {
+			await debugLog(client, "error", errorMsg)
+		}
+		return { ok: false, error: errorMsg }
 	}
 }
 
@@ -719,30 +726,25 @@ const ImagePlugin: Plugin = async (ctx) => {
 					for (const match of urlMatches) {
 						const [fullMatch, imageUrl] = match
 
-						try {
-							const imageData = await fetchImageFromUrl(imageUrl)
+						const result = await fetchImageFromUrl(imageUrl, client as unknown as OpencodeClient)
+						if (!result.ok) continue // Leave marker as-is if unresolvable
 
-							if (!imageData) continue // Leave marker as-is if unresolvable
+						const dataUri = toDataUri(result.buffer, result.mimeType)
 
-							const dataUri = toDataUri(imageData.buffer, imageData.mimeType)
+						// Replace marker text with empty string
+						text = text.replace(fullMatch, "")
+						hasChanges = true
 
-							// Replace marker text with empty string
-							text = text.replace(fullMatch, "")
-							hasChanges = true
-
-							// Insert FilePart right before the original text part
-							const filePart = {
-								type: "file",
-								mime: imageData.mimeType,
-								url: dataUri,
-								id: `prt_img_${Date.now()}`,
-								sessionID: part.sessionID || input.sessionID || "",
-								messageID: part.messageID || "",
-							}
-							output.parts.splice(i, 0, filePart)
-						} catch {
-							continue // Leave marker as-is on error
+						// Insert FilePart right before the original text part
+						const filePart = {
+							type: "file",
+							mime: result.mimeType,
+							url: dataUri,
+							id: `prt_img_${Date.now()}`,
+							sessionID: part.sessionID || input.sessionID || "",
+							messageID: part.messageID || "",
 						}
+						output.parts.splice(i, 0, filePart)
 					}
 
 					if (hasChanges) {
@@ -996,35 +998,18 @@ const ImagePlugin: Plugin = async (ctx) => {
 
 			image_get_url: tool({
 				description:
-					"Download an image from a URL and return base64 data without storing it. Supports http(s):// URLs and data: URIs.",
+					"Download an image from a URL and return base64 data without storing it. Supports http(s):// URLs, data: URIs, and local file paths.",
 				args: {
-					url: tool.schema.string().describe("Image URL (http(s)://) or data: URI"),
+					url: tool.schema.string().describe("Image URL (http(s)://), data: URI, or local file path"),
 				},
 				async execute(args, _toolCtx) {
 					const { url } = args
 					if (!url) return "❌ image_get_url: url is required"
 
-					try {
-						let buffer: Buffer
-						let mimeType: string
+					const fetchResult = await fetchImageFromUrl(url, client as unknown as OpencodeClient)
+					if (!fetchResult.ok) return `❌ image_get_url: ${fetchResult.error}`
 
-						if (url.startsWith("data:")) {
-							const match = url.match(/^data:(image\/[^;]+);base64,(.+)$/)
-							if (!match) return "❌ Invalid data URI format"
-							mimeType = match[1]
-							buffer = Buffer.from(match[2], "base64")
-						} else if (url.startsWith("http://") || url.startsWith("https://")) {
-							const result = await downloadUrl(url)
-							buffer = result.buffer
-							mimeType = result.mimeType
-						} else {
-							return "❌ image_get_url: unsupported URL type (use http(s):// or data: URI)"
-						}
-
-						return JSON.stringify({ mimeType, data: buffer.toString("base64") })
-					} catch (err) {
-						return `❌ image_get_url failed: ${err instanceof Error ? err.message : String(err)}`
-					}
+					return JSON.stringify({ mimeType: fetchResult.mimeType, data: fetchResult.buffer.toString("base64") })
 				},
 			}),
 

@@ -57,7 +57,7 @@ You have access to plugin-native tools for image retrieval:
 
 - `image_get(id: string)` — Retrieve an image by ID. Scans all sessions to find the image automatically. Returns a data URI string like `data:image/png;base64,...`.
 - `image_list()` — List all available image IDs with metadata.
-- `image_get_url(url: string)` — Fetch an image directly from a URL or data URI (returns base64, no indexing).
+- `image_get_url(url: string)` — Fetch an image directly from a URL, data URI, or local file path (returns base64, no indexing). Supports `http(s)://`, `data:`, and local filesystem paths.
 - `image_clear_session()` — Clear all images for the current session (idempotent).
 
 ### Usage Flow
